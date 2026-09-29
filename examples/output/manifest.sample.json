@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "generated_ts": 1789664071,
+  "source_files": [
+    "/tmp/hattest/out.jsonl"
+  ],
+  "split_target": false,
+  "records": 4,
+  "unique_urls": 4,
+  "skipped_lines": 0,
+  "runs": [
+    "smoke-attest"
+  ],
+  "targets": {
+    "shop": 4
+  },
+  "columns": [
+    "run",
+    "target",
+    "url",
+    "depth",
+    "ts",
+    "fingerprint",
+    "egress",
+    "price",
+    "title"
+  ],
+  "files": [
+    {
+      "name": "records.csv",
+      "sha256": "6c8a05cea92d8d9da2617cb8f8eb61a9cd006f545b0c175c21ec1ab3bc930cb3",
+      "bytes": 671,
+      "lines": 5
+    },
+    {
+      "name": "records.jsonl",
+      "sha256": "78bcdb26c0db0626e44d3b27edd5f80e0446ed82bcc7c4a6848541c72b4fa84f",
+      "bytes": 1016,
+      "lines": 4
+    }
+  ]
+}

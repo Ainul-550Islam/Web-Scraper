@@ -1,0 +1,149 @@
+{
+  "_note": "LOCAL/DEMO config: safe to run as-is (binds loopback, no secrets). For production: set admin_token (e.g. \"${HARVEST_ADMIN_TOKEN}\" \u2014 the engine expands whole-value ${VAR} references from the environment), keep or raise max_response_bytes, and read SECURITY.md before rebinding metrics_addr.",
+  "name": "client-demo-run",
+  "user_agent": "harvest/0.1 (acme-data-bot; contact: data@acme.example)",
+  "respect_robots": true,
+  "audit_path": "out/audit.json",
+  "concurrency": 4,
+  "request_timeout_secs": 20,
+  "connect_timeout_secs": 10,
+  "max_retries": 3,
+  "retry_base_ms": 500,
+  "max_single_wait_ms": 15000,
+  "max_response_bytes": 16777216,
+  "max_pages": 500,
+  "dlq_path": "out/dlq.jsonl",
+  "ckpt_path": "out/state.ckpt",
+  "ckpt_every_secs": 30,
+  "ckpt_every_pages": 250,
+  "revalidate_store": "out/validators.jsonl",
+  "revalidate_ttl_secs": 0,
+  "dlq_max_attempts": 3,
+  "default_policy": {
+    "requests_per_sec": 1.0,
+    "burst": 2,
+    "min_interval_ms": 500
+  },
+  "domain_policies": {
+    "api.partner-datasets.example": {
+      "requests_per_sec": 5.0,
+      "burst": 10,
+      "min_interval_ms": 100
+    }
+  },
+  "block_backoff_secs": 60,
+  "block_breaker_count": 5,
+  "robots_ttl_secs": 3600,
+  "redis_url": "redis://127.0.0.1:6379/0",
+  "proxies": [
+    {
+      "id": "direct"
+    },
+    {
+      "id": "fra-1",
+      "url": "http://user:pass@fra-gw.internal.example:8000",
+      "region": "eu-west"
+    },
+    {
+      "id": "sin-1",
+      "url": "http://user:pass@sin-gw.internal.example:8001",
+      "region": "ap-south"
+    }
+  ],
+  "targets": [
+    {
+      "id": "product-catalog",
+      "start_url": "http://127.0.0.1:8099/index.html",
+      "max_depth": 2,
+      "follow_links": true,
+      "link_selector": "a[href]",
+      "include": [
+        "/product/"
+      ],
+      "exclude": [
+        "/cart",
+        "/login"
+      ],
+      "max_pages": 40,
+      "extract": {
+        "title": {
+          "css": "h1"
+        },
+        "price": {
+          "css": "p.price"
+        },
+        "image": {
+          "css": "a.product",
+          "attr": "href"
+        },
+        "tags": {
+          "css": "li.tag",
+          "all": true
+        }
+      },
+      "sitemap": true
+    },
+    {
+      "id": "press-feed",
+      "start_url": "http://127.0.0.1:8099/news.html",
+      "max_depth": 0,
+      "follow_links": false,
+      "max_pages": 5,
+      "extract": {
+        "headline": {
+          "css": "h2"
+        },
+        "date": {
+          "css": "time",
+          "attr": "datetime"
+        }
+      }
+    },
+    {
+      "id": "catalog-api",
+      "mode": "json",
+      "start_url": "http://127.0.0.1:8099/api/catalog.json",
+      "follow_links": false,
+      "extract": {
+        "ids": {
+          "path": "$.items[*].id",
+          "all": true
+        },
+        "first": {
+          "path": "$.items[0].name"
+        },
+        "cents": {
+          "path": "$.items[0].price_cents"
+        }
+      }
+    }
+  ],
+  "output": {
+    "kind": "jsonl",
+    "path": "out/results.jsonl"
+  },
+  "metrics_addr": "127.0.0.1:9678",
+  "schedule": {
+    "every_secs": 3600,
+    "runs": 0,
+    "history_path": "out/runs.jsonl"
+  },
+  "admin_token": null,
+  "_admin_token_note": "null = no auth, loopback only. To bind 0.0.0.0 you MUST set a token; validate rejects the open combination.",
+  "alerts": {
+    "webhook_url": null,
+    "events": [
+      "run_error",
+      "no_data",
+      "high_block_rate"
+    ],
+    "min_records": 1,
+    "max_block_rate": 0.4,
+    "per_target": {
+      "product-catalog": {
+        "min_records": 25,
+        "max_block_rate": 0.25
+      }
+    }
+  }
+}

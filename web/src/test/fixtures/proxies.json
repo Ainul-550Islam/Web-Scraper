@@ -1,0 +1,1 @@
+{"degraded":0,"down":0,"entries":[{"failures":0,"id":"direct","inflight":0,"latency_ewma_ms":9.26277888,"region":null,"requests":8,"state":"healthy","success_ewma":1.0}],"healthy":1,"inflight_denied":0,"total":1,"unprobed":0}

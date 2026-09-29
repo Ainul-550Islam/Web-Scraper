@@ -1,0 +1,173 @@
+/* ============================================================
+   harvest console — design tokens
+   Single source of truth. No component may hard-code colors,
+   radii, or timing that exist here.
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* ── surfaces (layered, not gradient) ───────────────────── */
+  --bg-0: #0a0d13; /* app background            */
+  --bg-1: #0f131b; /* panels                    */
+  --bg-2: #151a24; /* elevated cards            */
+  --bg-3: #1b212e; /* hovered / active elevation */
+  --bg-inset: #0c1017; /* wells, code, table stripes */
+  --overlay: rgba(7, 9, 13, 0.72);
+  --scrim: rgba(7, 9, 13, 0.55);
+
+  /* ── structure ────────────────────────────────────────────── */
+  --line: rgba(148, 163, 190, 0.13);
+  --line-strong: rgba(148, 163, 190, 0.24);
+  --line-faint: rgba(148, 163, 190, 0.07);
+
+  /* ── text hierarchy ───────────────────────────────────────── */
+  --text-1: #e8ecf4;
+  --text-2: #9aa5b8;
+  --text-3: #5d6678;
+  --text-link: #7fb3ff;
+
+  /* ── brand accent (harvest gold, desaturated) ─────────────── */
+  --accent: #d9a441;
+  --accent-hi: #e8bc6a;
+  --accent-lo: #8a6a2e;
+  --accent-soft: rgba(217, 164, 65, 0.12);
+  --accent-line: rgba(217, 164, 65, 0.35);
+  --accent-on: #1a1406;
+
+  /* ── semantic status ──────────────────────────────────────── */
+  --ok: #3cbf8e;
+  --ok-soft: rgba(60, 191, 142, 0.13);
+  --ok-line: rgba(60, 191, 142, 0.38);
+  --warn: #e4b13c;
+  --warn-soft: rgba(228, 177, 60, 0.13);
+  --warn-line: rgba(228, 177, 60, 0.38);
+  --err: #ef6a6a;
+  --err-soft: rgba(239, 106, 106, 0.13);
+  --err-line: rgba(239, 106, 106, 0.4);
+  --info: #5aa7e8;
+  --info-soft: rgba(90, 167, 232, 0.13);
+  --info-line: rgba(90, 167, 232, 0.38);
+  --idle: #6b7590;
+  --idle-soft: rgba(107, 117, 144, 0.14);
+
+  /* ── focus ────────────────────────────────────────────────── */
+  --focus: rgba(127, 179, 255, 0.65);
+  --focus-ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--focus);
+
+  /* ── shadows (soft, layered depth — never heavy) ─────────── */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.36), 0 0 1px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 12px 36px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --glow-ok: 0 0 10px rgba(60, 191, 142, 0.45);
+  --glow-err: 0 0 10px rgba(239, 106, 106, 0.5);
+  --glow-warn: 0 0 10px rgba(228, 177, 60, 0.45);
+
+  /* ── geometry ─────────────────────────────────────────────── */
+  --r-sm: 4px;
+  --r-md: 7px;
+  --r-lg: 11px;
+  --r-pill: 999px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 22px;
+  --s-6: 30px;
+  --s-7: 44px;
+  --rail: 232px;
+  --rail-collapsed: 60px;
+  --topbar: 52px;
+  --statusbar: 30px;
+
+  /* ── typography ───────────────────────────────────────────── */
+  --font-ui: ui-sans-serif, "Inter", "Segoe UI", system-ui, -apple-system,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+    "Menlo", monospace;
+  --fs-display: 26px;
+  --fs-page: 20px;
+  --fs-section: 15px;
+  --fs-metric-xl: 34px;
+  --fs-metric: 24px;
+  --fs-metric-sm: 17px;
+  --fs-body: 13.5px;
+  --fs-label: 11px;
+  --fs-caption: 11px;
+  --fs-code: 12px;
+  --fs-table: 12.5px;
+  --fs-status: 12px;
+  --lh-tight: 1.15;
+  --lh-body: 1.55;
+  --tracking-label: 0.08em;
+
+  /* ── motion ───────────────────────────────────────────────── */
+  --t-instant: 90ms;
+  --t-fast: 150ms;
+  --t-med: 230ms;
+  --t-slow: 380ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.21, 0.99);
+  --ease-out: cubic-bezier(0.16, 0.84, 0.24, 1);
+}
+
+/* ── light mode: same discipline, paper-grade layers ──────────── */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-0: #f3f4f7;
+  --bg-1: #fafbfc;
+  --bg-2: #ffffff;
+  --bg-3: #eef0f4;
+  --bg-inset: #eceef2;
+  --overlay: rgba(30, 35, 46, 0.35);
+  --scrim: rgba(30, 35, 46, 0.22);
+
+  --line: rgba(30, 41, 66, 0.13);
+  --line-strong: rgba(30, 41, 66, 0.24);
+  --line-faint: rgba(30, 41, 66, 0.06);
+
+  --text-1: #171b23;
+  --text-2: #4d5566;
+  --text-3: #8a91a1;
+  --text-link: #2b62c9;
+
+  --accent: #a97a1b;
+  --accent-hi: #8a6314;
+  --accent-lo: #e3c98b;
+  --accent-soft: rgba(169, 122, 27, 0.1);
+  --accent-line: rgba(169, 122, 27, 0.4);
+  --accent-on: #fffaf0;
+
+  --ok: #1d9b6c;
+  --ok-soft: rgba(29, 155, 108, 0.1);
+  --ok-line: rgba(29, 155, 108, 0.4);
+  --warn: #b98a1c;
+  --warn-soft: rgba(185, 138, 28, 0.12);
+  --warn-line: rgba(185, 138, 28, 0.45);
+  --err: #cf4b4b;
+  --err-soft: rgba(207, 75, 75, 0.1);
+  --err-line: rgba(207, 75, 75, 0.4);
+  --info: #2f6fb5;
+  --info-soft: rgba(47, 111, 181, 0.1);
+  --info-line: rgba(47, 111, 181, 0.4);
+  --idle: #778092;
+  --idle-soft: rgba(119, 128, 146, 0.14);
+
+  --focus: rgba(43, 98, 201, 0.55);
+
+  --shadow-1: 0 1px 2px rgba(23, 30, 45, 0.08);
+  --shadow-2: 0 2px 10px rgba(23, 30, 45, 0.1), 0 0 1px rgba(23, 30, 45, 0.25);
+  --shadow-3: 0 14px 40px rgba(23, 30, 45, 0.16), 0 2px 8px rgba(23, 30, 45, 0.1);
+  --glow-ok: 0 0 8px rgba(29, 155, 108, 0.35);
+  --glow-err: 0 0 8px rgba(207, 75, 75, 0.35);
+  --glow-warn: 0 0 8px rgba(185, 138, 28, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-instant: 0ms;
+    --t-fast: 0ms;
+    --t-med: 0ms;
+    --t-slow: 0ms;
+  }
+}

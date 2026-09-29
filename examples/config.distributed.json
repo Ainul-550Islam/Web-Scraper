@@ -1,0 +1,52 @@
+{
+  "_note": "Distributed mode (binary built --features redis). Flow:  harvest push   --config examples/config.distributed.json --reset   (seed once)  ->  run `harvest worker --config \u2026` on N machines/containers  ->  `harvest queue --config \u2026` for depth. Each shard writes its own dataset partition; merge & verify with `harvest export --from out/data/dt=*/part-*.jsonl --to delivery/` (the shell expands the glob; export takes repeated --from paths). Politeness + robots + dedup are shared through Redis, so shards never stack on one host Template note: blog.example.com is a placeholder \u2014 a literal run dead-letters on transport (correct behavior). For a local end-to-end demo, point the target start_url at the bundled mock: http://127.0.0.1:8099/index.html (start it: python3 demo/server.py 8099).",
+  "name": "harvest-dist",
+  "user_agent": "harvest/0.9 (data collection on contract; contact: data@example.com)",
+  "respect_robots": true,
+  "concurrency": 4,
+  "max_pages": 100000,
+  "request_timeout_secs": 20,
+  "default_policy": {
+    "requests_per_sec": 1.0,
+    "burst": 2,
+    "min_interval_ms": 500
+  },
+  "redis_url": "redis://127.0.0.1:6379",
+  "dlq_path": "out/dist-dlq.jsonl",
+  "audit_path": "out/dist-audit.json",
+  "targets": [
+    {
+      "id": "articles",
+      "start_url": "https://blog.example.com/",
+      "follow_links": true,
+      "max_depth": 3,
+      "include": [
+        "/20"
+      ],
+      "exclude": [
+        "/tag/",
+        "/feed"
+      ],
+      "max_pages": 250,
+      "extract": {
+        "title": {
+          "css": "h1.entry-title"
+        },
+        "published": {
+          "css": "time.entry-date",
+          "attr": "datetime"
+        },
+        "body": {
+          "css": "article",
+          "all": false
+        }
+      }
+    }
+  ],
+  "output": {
+    "kind": "dataset",
+    "dir": "out/data",
+    "partition": "day"
+  },
+  "metrics_addr": "127.0.0.1:9678"
+}

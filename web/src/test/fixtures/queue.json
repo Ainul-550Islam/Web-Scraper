@@ -1,0 +1,1 @@
+{"avg_queue_wait_ms":0.0,"state":"healthy","stats":{"depth":0,"expired":0,"inflight":3,"max_depth":0,"mode":"fifo","per_target_active":[[0,3],[1,0]],"per_target_depths":[],"popped":5,"pushed":5,"rejected":0}}

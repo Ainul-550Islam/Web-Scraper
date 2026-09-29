@@ -1,0 +1,102 @@
+# One-click client deployment: engine + metrics + dashboards.
+# usage: docker compose -f ops/docker-compose.yml up -d
+#   config: drop your JSON config at ./ops/harvest/config.json (mounted read-only)
+#   secrets: reference them in the config as "${VAR}" — the engine expands
+#            whole-value ${VAR} references from this compose file's environment.
+#            Nothing is baked into any image or committed to the repo.
+# DEV DEFAULTS BELOW BIND EVERYTHING TO 127.0.0.1 ON THE HOST. To serve a
+# network, front these with a TLS proxy or firewall on purpose — do not just
+# delete the "127.0.0.1:" prefixes and hope.
+name: harvest
+
+services:
+  harvest:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: harvest-engine:latest
+    restart: unless-stopped
+    # The engine drains gracefully on SIGINT (finish in-flight pages, flush
+    # sinks, land history/audit/checkpoint). docker stop sends SIGTERM,
+    # which the process does not catch — so ask for SIGINT and give the
+    # drain enough room (bounded by request_timeout_secs per page).
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+    volumes:
+      - ./harvest/config.json:/etc/harvest/config.json:ro
+      - harvest-data:/var/lib/harvest
+    ports:
+      - "127.0.0.1:9678:9678"   # admin/metrics; token-gated if admin_token set
+    environment:
+      RUST_LOG: "info,harvest=warn"
+      # Example secret injection (config.json would contain "admin_token":
+      # "${HARVEST_ADMIN_TOKEN}" etc). Generate: head -c24 /dev/urandom | base64
+      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:-}
+    # fail closed: an admin API without a token on a non-loopback bind is a
+    # startup error in the engine itself; keep 127.0.0.1 mapping for dev.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  console:
+    # Static web console (hash-routed SPA) served by nginx, which also proxies
+    # /api/ -> the engine (ops/harvest/console.nginx.conf). The browser never
+    # learns the admin token from anywhere but the user; nothing here stores it.
+    build:
+      context: ../web
+      args:
+        VITE_API_BASE: /api
+    image: harvest-console:latest
+    restart: unless-stopped
+    depends_on:
+      - harvest
+    volumes:
+      - ./harvest/console.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:8088:8080"   # open http://127.0.0.1:8088 and connect to /api
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    environment:
+      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:-}
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"   # prometheus has NO auth — never expose raw
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      # DEV-ONLY fallback. For any real deployment set
+      # GRAFANA_ADMIN_PASSWORD in your shell/.env before `up`:
+      #   printf 'export GRAFANA_ADMIN_PASSWORD=...' >> ops/.env (chmod 600)
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-first-login}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  harvest-data:
+  prom-data:
+  grafana-data:

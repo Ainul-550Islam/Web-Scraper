@@ -1,0 +1,56 @@
+/* 14-tour-welcome — first-run welcome card + optional product tour.
+ * Keys off existing tokens only; the tour is a passive corner card, never a
+ * modal, never blocks the page (product rule: no tutorial wall). */
+
+.welcome-panel {
+  display: grid;
+  gap: 10px;
+}
+.welcome-panel .wp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.welcome-panel .wp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.welcome-panel .wp-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tour-card {
+  position: fixed;
+  right: 16px;
+  bottom: 46px; /* above the status bar */
+  z-index: 60;
+  width: min(320px, calc(100vw - 32px));
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius, 10px);
+  background: var(--surface-1, #12151b);
+  border: 1px solid var(--line-1, #262b36);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.35);
+}
+.tour-card .tour-steps {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tour-card .tour-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-card {
+    animation: none;
+  }
+}

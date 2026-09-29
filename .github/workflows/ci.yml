@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  web:
+    name: Web console (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+  clippy:
+    name: Clippy (all targets, all features, -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # The core suite needs NO services: the live Redis/Postgres tests gate
+  # themselves off unless HARVEST_TEST_REDIS / HARVEST_TEST_PG are set.
+  test-default:
+    name: Test (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets
+
+  test-all:
+    name: Test (all features, live Redis + Postgres services)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: harvest
+          POSTGRES_PASSWORD: harvest
+          POSTGRES_DB: harvest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U harvest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      HARVEST_TEST_REDIS: "1"
+      HARVEST_TEST_PG: "1"
+      # Defaults in the tests already point here; set explicitly so a service
+      # config change fails loudly instead of silently skipping.
+      HARVEST_TEST_REDIS_URL: "redis://127.0.0.1:6399/9"
+      HARVEST_PG_DSN: "host=127.0.0.1 port=5432 user=harvest password=harvest dbname=harvest"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets --all-features
+
+  # Compile-level validation of every optional feature in isolation; catches
+  # broken cfg-gating that the all-features run would mask.
+  features:
+    name: Feature combos (check)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "sqlite", "postgres", "redis"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --all-targets ${{ matrix.features }}
+        run: cargo check --all-targets ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+
+  release:
+    name: Release build + CLI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --all-features
+      - run: ./target/release/harvest --version
+      - run: ./target/release/harvest validate --config config.example.json
+      # attestation surface: key generation works, and verifying a file that
+      # was never signed must FAIL (exit non-zero) rather than pass silently.
+      - run: |
+          ./target/release/harvest attest --gen-key /tmp/ci-attest.key
+          printf 'evidence\n' > /tmp/ci-art.txt
+          if ./target/release/harvest attest --verify /tmp/ci-art.txt --key /tmp/ci-attest.key; then
+            echo "FAIL: unsigned artifact verified"; exit 1
+          fi
+          echo "OK: unsigned artifact correctly rejected"
+      # Buyer-flow E2E against real local backends only (demo mock site +
+      # `harvest serve` + built console + CLI export/verify) — deterministic,
+      # single pass, no external network.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci --no-audit --no-fund
+      - run: cd web && npm run build
+      - run: cd web && HARVEST_BIN="$GITHUB_WORKSPACE/target/release/harvest" npm run e2e:buyer

@@ -1,0 +1,1 @@
+{"page":{"items":[{"config_sha256":"e9b681df59f8f520150dcbf1c004043152621b06c55a98ccd4889f0389202335","duration_ms":1170,"error":null,"index":0,"quarantined":0,"run":"demo-run","status":"ok","ts":1789963480,"written":5}],"limit":50,"offset":0,"total":1},"window":1,"window_note":"listings scan the newest 512 history lines; `total` is within that window"}

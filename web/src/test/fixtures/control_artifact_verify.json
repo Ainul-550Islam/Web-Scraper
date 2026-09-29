@@ -1,0 +1,10 @@
+{
+  "delivery": "job-1",
+  "detail": {
+    "files": 4,
+    "records": 4,
+    "records_basis": "jsonl-lines",
+    "state": "ok"
+  },
+  "state": "ok"
+}

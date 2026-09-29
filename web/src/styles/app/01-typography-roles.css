@@ -1,0 +1,46 @@
+/* ── typography roles ─────────────────────────────────────────── */
+.t-display {
+  font-size: var(--fs-display);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: var(--lh-tight);
+}
+.t-page {
+  font-size: var(--fs-page);
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+.t-section {
+  font-size: var(--fs-section);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+.t-metric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-metric);
+  font-weight: 560;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+.t-metric-xl {
+  font-size: var(--fs-metric-xl);
+}
+.t-metric-sm {
+  font-size: var(--fs-metric-sm);
+}
+.t-label {
+  font-size: var(--fs-label);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.t-caption {
+  font-size: var(--fs-caption);
+  color: var(--text-3);
+}
+.t-code {
+  font-size: var(--fs-code);
+  color: var(--text-2);
+}

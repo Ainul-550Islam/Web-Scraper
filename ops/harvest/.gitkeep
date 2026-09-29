@@ -1,0 +1,2 @@
+# harvest/config.json lives here for docker compose deployment.
+# Start from ../../config.example.json and edit.

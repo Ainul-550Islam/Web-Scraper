@@ -1,0 +1,30 @@
+/* ── status bar ───────────────────────────────────────────────── */
+.statusbar {
+  grid-area: status;
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: 0 var(--s-5);
+  border-top: 1px solid var(--line);
+  background: var(--bg-1);
+  font-size: 11px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.statusbar .dot {
+  margin-right: 6px;
+}
+.statusbar-item {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.statusbar-item + .statusbar-item::before {
+  content: "";
+  display: inline-block;
+  width: 1px;
+  height: 10px;
+  margin-right: var(--s-4);
+  background: var(--line);
+  vertical-align: -1px;
+}

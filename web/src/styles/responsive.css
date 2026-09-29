@@ -1,0 +1,139 @@
+/*
+ * patterns.tsx + §37 mobile layer + §6 extras that the base sheet predates.
+ * Loaded after app.css; everything keys off existing tokens only.
+ */
+
+/* ── Tooltip (focus + hover, no JS timers) ───────────────────── */
+.tipwrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--r-sm);
+}
+.tipwrap:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.tip {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  color: var(--text-1);
+  font: 500 11px/1.5 var(--font-mono);
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-2);
+  white-space: pre;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
+  z-index: 40;
+}
+.tipwrap:hover .tip,
+.tipwrap:focus-within .tip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tip { transition: none; }
+}
+
+/* ── Tabs ────────────────────────────────────────────────────── */
+.tabs { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--bg-inset); }
+.tab { font: 600 12px var(--font-ui); color: var(--text-2); background: none; border: 0; border-radius: calc(var(--r-pill) - 3px); padding: 4px 12px; cursor: pointer; transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
+.tab:hover { color: var(--text-1); }
+.tab.on { background: var(--accent-soft); color: var(--text-1); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.tab:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ── Checkbox ────────────────────────────────────────────────── */
+.checkbox { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text-1); cursor: pointer; padding: 4px 8px; border-radius: var(--r-sm); }
+.checkbox:hover { background: var(--bg-2); }
+.checkbox input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.checkbox .box { width: 15px; height: 15px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg-inset); display: inline-grid; place-items: center; color: var(--accent-on); transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out); flex: none; }
+.checkbox input:checked + .box { background: var(--accent); border-color: var(--accent); }
+.checkbox input:focus-visible + .box { box-shadow: var(--focus-ring); }
+.checkbox:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Timeline (list semantics; dot rail) ─────────────────────── */
+ol.timeline { list-style: none; margin: 0; padding: 0 0 0 18px; display: grid; gap: 10px; position: relative; }
+ol.timeline::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 1.5px; background: linear-gradient(var(--line-strong), var(--line-faint)); }
+.timeline .tl-row { position: relative; }
+.timeline .tl-dot { position: absolute; left: -18px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--bg-3); border: 1.5px solid var(--line-strong); }
+.timeline .tl-row.ok .tl-dot { border-color: var(--ok); box-shadow: var(--glow-ok); }
+.timeline .tl-row.warn .tl-dot { border-color: var(--warn); }
+.timeline .tl-row.err .tl-dot { border-color: var(--err); box-shadow: var(--glow-err); }
+.timeline .tl-row.info .tl-dot { border-color: var(--info); }
+
+/* ── ChartCard ───────────────────────────────────────────────── */
+.chart-card .chart-body { display: grid; gap: 8px; }
+.chart-card .bars { height: 52px; }
+
+/* ── FormSection warning strip ───────────────────────────────── */
+.sec-warning { margin: 0 0 10px; padding: 7px 10px; border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--text-1); border-radius: var(--r-md); font-size: 12.5px; display: flex; gap: 7px; align-items: baseline; }
+
+/* ── §37 narrow viewport: stacked tables + bottom-sheet drawer ─ */
+@media (max-width: 640px) {
+  .grid-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-2, .grid-3 { grid-template-columns: minmax(0, 1fr); }
+  .ctrl-grid { grid-template-columns: 1fr; }
+  .top-actions .search-launcher span { display: none; }
+
+  /* wide tables collapse into labeled cards */
+  .table-wrap table.data { display: block; }
+  .table-wrap .data thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .table-wrap .data tbody,
+  .table-wrap .data tr { display: block; }
+  .table-wrap .data tbody tr { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-1); padding: 6px 10px; margin-bottom: 8px; }
+  .table-wrap .data tbody td { display: grid; grid-template-columns: 9em minmax(0, 1fr); gap: 10px; border: 0; padding: 4px 0; }
+  .table-wrap .data tbody td::before { content: attr(data-col); color: var(--text-3); font: 600 10.5px var(--font-ui); letter-spacing: 0.05em; text-transform: uppercase; }
+  .table-wrap .data .num { text-align: right; }
+
+  /* details panels become bottom sheets */
+  .drawer { top: auto; bottom: 0; left: 0; right: 0; width: auto; height: 72vh; border-radius: var(--r-lg) var(--r-lg) 0 0; border-left: 0; border-top: 1px solid var(--line-strong); animation: sheet-in var(--t-med) var(--ease-out); }
+  @keyframes sheet-in { from { transform: translateY(24px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .drawer { animation: none; } }
+}
+
+/* ── first-run connect experience (§3) ───────────────────────── */
+.connect-wrap {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--s-4);
+  background:
+    radial-gradient(60% 50% at 50% 0%, var(--accent-soft), transparent 70%),
+    var(--bg-0);
+}
+.connect-card { width: min(620px, 100%); display: grid; gap: var(--s-4); }
+.connect-brand { display: flex; gap: 12px; align-items: center; }
+.brand-mark {
+  width: 40px; height: 40px; flex: none;
+  display: grid; place-items: center;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
+}
+.connect-card h1 { margin: 0; }
+.connect-card .t-caption { margin: 2px 0 0; }
+.connect-caps { margin: 0; padding: 0 0 0 18px; display: grid; gap: 6px; font-size: 13px; color: var(--text-2); }
+.connect-caps li::marker { color: var(--accent); }
+.connect-form { display: grid; gap: var(--s-3); }
+.connect-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.connect-status { min-height: 22px; font-size: 12.5px; }
+.connect-status .cs { display: inline-flex; gap: 7px; align-items: center; }
+.connect-status .cs.ok { color: var(--ok); }
+.connect-status .cs.err { color: var(--err); }
+.connect-foot { margin: 0; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none !important; } }
+
+/* spinner for the probing button (motion-gated above) */
+.spin { animation: spin-kf 0.9s linear infinite; }
+@keyframes spin-kf { to { transform: rotate(360deg); } }

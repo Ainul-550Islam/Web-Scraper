@@ -1,0 +1,204 @@
+/* ── forms ────────────────────────────────────────────────────── */
+.field {
+  display: grid;
+  gap: 6px;
+}
+.field-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--text-1);
+}
+.field-help {
+  font-size: var(--fs-caption);
+  color: var(--text-3);
+  line-height: 1.5;
+}
+.field-note {
+  font-size: 10.5px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.input,
+.select,
+.textarea {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--bg-inset);
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12.5px;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.textarea {
+  height: auto;
+  min-height: 84px;
+  padding: var(--s-2) var(--s-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+  line-height: 1.6;
+  resize: vertical;
+}
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--line-strong);
+}
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  border-color: var(--info-line);
+}
+.input[aria-invalid="true"],
+.textarea[aria-invalid="true"] {
+  border-color: var(--err-line);
+  box-shadow: inset 0 0 0 1px var(--err-line);
+}
+.input:disabled {
+  color: var(--text-3);
+}
+.field-error {
+  font-size: 11.5px;
+  color: var(--err);
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.unit {
+  position: relative;
+}
+.unit::after {
+  content: attr(data-unit);
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 11px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+.unit .input {
+  padding-right: 44px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* toggle */
+.toggle {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+  padding: 0;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition:
+    left var(--t-fast) var(--ease-out),
+    background var(--t-fast);
+}
+.toggle[aria-checked="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.toggle[aria-checked="true"]::after {
+  left: 16px;
+  background: var(--accent);
+}
+
+/* segmented */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.segmented button {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast);
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--bg-2);
+  color: var(--text-1);
+  box-shadow: var(--shadow-1);
+}
+
+/* tag input */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  min-height: 32px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 4px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+.tag button {
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+}
+.tag button:hover {
+  color: var(--err);
+  background: var(--err-soft);
+}
+.tags input {
+  flex: 1;
+  min-width: 90px;
+  border: 0;
+  background: none;
+  outline: none;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 4px;
+}

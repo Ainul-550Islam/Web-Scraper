@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: harvest
+    folder: Harvest
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

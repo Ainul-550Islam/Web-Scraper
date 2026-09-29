@@ -1,0 +1,6 @@
+# Engine builds pin the toolchain channel; rustfmt + clippy -D warnings are
+# part of every gate (see Makefile), so the pinned channel keeps CI and local
+# formatting byte-identical.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

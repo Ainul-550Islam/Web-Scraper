@@ -1,0 +1,69 @@
+{
+  "name": "demo-run",
+  "user_agent": "harvest-demo/0.1 (contact: demo@example.com)",
+  "respect_robots": true,
+  "concurrency": 3,
+  "max_retries": 2,
+  "retry_base_ms": 100,
+  "max_pages": 50,
+  "default_policy": {
+    "requests_per_sec": 2.0,
+    "burst": 4,
+    "min_interval_ms": 250
+  },
+  "metrics_addr": "127.0.0.1:9678",
+  "targets": [
+    {
+      "id": "demo-catalog",
+      "start_url": "http://127.0.0.1:8099/index.html",
+      "max_depth": 2,
+      "follow_links": true,
+      "include": [
+        "/product/",
+        "/index.html"
+      ],
+      "max_pages": 20,
+      "extract": {
+        "title": {
+          "css": "h1"
+        },
+        "price": {
+          "css": "p.price"
+        },
+        "tags": {
+          "css": "li.tag",
+          "all": true
+        },
+        "link": {
+          "css": "a.product",
+          "attr": "href"
+        }
+      }
+    },
+    {
+      "id": "demo-news",
+      "start_url": "http://127.0.0.1:8099/news.html",
+      "max_depth": 0,
+      "follow_links": false,
+      "max_pages": 5,
+      "extract": {
+        "headline": {
+          "css": "h2"
+        },
+        "date": {
+          "css": "time",
+          "attr": "datetime"
+        }
+      }
+    }
+  ],
+  "output": {
+    "kind": "jsonl",
+    "path": "out/demo.jsonl"
+  },
+  "schedule": {
+    "every_secs": 10,
+    "runs": 0,
+    "history_path": "out/demo-runs.jsonl"
+  }
+}

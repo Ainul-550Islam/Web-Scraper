@@ -1,0 +1,17 @@
+/target
+/out
+/deliver*
+*.log
+
+# web console build artifacts
+web/node_modules/
+web/dist/
+web/coverage/
+
+# local env files and incidental artifacts (never commit)
+.env
+.env.*
+*.local
+screenshots/
+web/node_modules/
+artifacts/

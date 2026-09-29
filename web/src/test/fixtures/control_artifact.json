@@ -1,0 +1,27 @@
+{
+  "artifact": {
+    "bytes": 680,
+    "content_type": "text/csv; charset=utf-8",
+    "created_ts": 1790066829,
+    "downloadable": true,
+    "id": "art-3",
+    "job": "job-1",
+    "name": "records.csv",
+    "role": "payload",
+    "sha256": "3c6d4ea4602ef399ae6cb6574fa5e76c64f463923679f954efa47d44e26ad25c",
+    "state": "ready",
+    "verification": {
+      "files": 4,
+      "records": 4,
+      "records_basis": "jsonl-lines",
+      "state": "ok"
+    }
+  },
+  "job": "job-1",
+  "verification": {
+    "files": 4,
+    "records": 4,
+    "records_basis": "jsonl-lines",
+    "state": "ok"
+  }
+}

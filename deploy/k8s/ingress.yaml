@@ -1,0 +1,22 @@
+# TLS terminates at the ingress controller; /api is routed to the engine so
+# the console keeps working same-origin (no CORS surface added anywhere).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harvest
+  namespace: harvest
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+spec:
+  rules:
+    - host: console.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: harvest-engine, port: { number: 9678 } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: harvest-console, port: { number: 80 } }

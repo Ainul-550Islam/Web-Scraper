@@ -1,0 +1,125 @@
+{
+  "_note": "Extraction-pipeline demo: value transforms + declared schema. Start the mock (python3 demo/server.py 8099), then: cargo run --release -- run --config examples/config.pipeline.json. Inspect the contract first with: cargo run -- schema --config examples/config.pipeline.json [--target shop]. shop-strict quarantines records that violate the declared number shape instead of writing them.",
+  "name": "harvest-pipeline",
+  "user_agent": "harvest-example/0.9 (compliant data engine; contact: data@example.com)",
+  "respect_robots": true,
+  "concurrency": 2,
+  "max_pages": 24,
+  "default_policy": {
+    "requests_per_sec": 2.0,
+    "burst": 2,
+    "min_interval_ms": 300
+  },
+  "targets": [
+    {
+      "id": "shop",
+      "start_url": "http://127.0.0.1:8099/index.html",
+      "follow_links": true,
+      "max_depth": 1,
+      "include": [
+        "/product/"
+      ],
+      "max_pages": 10,
+      "extract": {
+        "title": {
+          "css": "h1",
+          "transforms": [
+            {
+              "op": "collapse_whitespace"
+            },
+            {
+              "op": "regex_replace",
+              "pattern": "(?i)^product\\s+",
+              "replacement": ""
+            },
+            {
+              "op": "truncate",
+              "max_chars": 80
+            }
+          ]
+        },
+        "price": {
+          "css": "p.price",
+          "transforms": [
+            {
+              "op": "strip_tags"
+            },
+            {
+              "op": "parse_number"
+            },
+            {
+              "op": "round_to",
+              "decimals": 2
+            }
+          ]
+        },
+        "desc": {
+          "css": "p.desc",
+          "all": true,
+          "transforms": [
+            {
+              "op": "strip_tags"
+            },
+            {
+              "op": "split",
+              "sep": ";",
+              "trim": true
+            },
+            {
+              "op": "lowercase"
+            },
+            {
+              "op": "unique"
+            }
+          ]
+        }
+      },
+      "schema": {
+        "enforce": "coerce",
+        "fields": {
+          "title": "text",
+          "price": "number",
+          "desc": "list"
+        }
+      }
+    },
+    {
+      "id": "shop-strict",
+      "start_url": "http://127.0.0.1:8099/index.html",
+      "follow_links": true,
+      "max_depth": 1,
+      "include": [
+        "/product/"
+      ],
+      "max_pages": 10,
+      "extract": {
+        "price": {
+          "css": "p.price",
+          "transforms": [
+            {
+              "op": "mask_pii",
+              "strategy": "redact",
+              "kinds": [
+                "email"
+              ]
+            },
+            {
+              "op": "parse_number"
+            }
+          ]
+        }
+      },
+      "schema": {
+        "enforce": "strict",
+        "fields": {
+          "price": "number"
+        },
+        "quarantine_path": "out/pipeline-quarantine.jsonl"
+      }
+    }
+  ],
+  "output": {
+    "kind": "jsonl",
+    "path": "out/pipeline.jsonl"
+  }
+}

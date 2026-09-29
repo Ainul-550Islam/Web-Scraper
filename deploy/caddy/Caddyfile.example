@@ -1,0 +1,17 @@
+# Caddy alternative for TLS + /api proxy in one file (static console).
+# caddy fmt-able; paths mirror deploy/systemd/harvest.service.example.
+console.example.com {
+	encode gzip
+	root * /var/www/harvest-console
+	handle {
+		try_files {path} =404
+		file_server
+	}
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy 127.0.0.1:9678
+	}
+	header X-Content-Type-Options nosniff
+	header X-Frame-Options DENY
+	header Referrer-Policy no-referrer
+}

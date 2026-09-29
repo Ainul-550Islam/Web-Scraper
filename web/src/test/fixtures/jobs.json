@@ -1,0 +1,1 @@
+{"job":{"jobs":[{"blocked":0,"failed":0,"quarantined":0,"revalidated":0,"target":"demo-catalog","written":4},{"blocked":0,"failed":0,"quarantined":0,"revalidated":0,"target":"demo-news","written":1}],"run":"demo-run","status":"running","uptime_ms":1002},"note":"per-target tallies come from the most recent persisted run"}

@@ -1,0 +1,65 @@
+// ROUTES — split from routes.ts; barrel re-exports keep every public path & name
+
+import type { RouteDef } from "./RouteDef";
+
+
+/** The canonical page set — all 26 backed by real endpoints or local-only
+ *  tooling (docs/web-client.md). */
+export const ROUTES: RouteDef[] = [
+  { path: "/", label: "Overview", icon: "Overview", group: "Operations",
+    title: "Overview", desc: "Engine state at a glance" },
+  { path: "/runs", label: "Runs", icon: "Runs", group: "Operations",
+    title: "Runs", desc: "Paged history over the schedule ledger" },
+  { path: "/jobs", label: "Jobs", icon: "Jobs", group: "Operations",
+    title: "Jobs", desc: "Per-target tallies of the live or latest run" },
+  { path: "/queue", label: "Queue", icon: "Queue", group: "Operations",
+    title: "Queue", desc: "Depth, inflight, and waiting from the live runtime" },
+  { path: "/workers", label: "Workers", icon: "Workers", group: "Operations",
+    title: "Workers", desc: "Pool registration, utilization, and restarts" },
+  { path: "/command", label: "Command Center", icon: "Monitor", group: "Operations",
+    title: "Command Center", desc: "Runtime, storage lanes, alerts, and newest events on one screen" },
+  { path: "/run", label: "Run Detail", icon: "Runs", group: "Operations",
+    title: "Run Detail", desc: "One run from the ledger: /run?run=<name>[&ts=<secs>]" },
+
+  { path: "/proxies", label: "Proxies", icon: "Proxies", group: "Network & Flow",
+    title: "Proxy Pool", desc: "Egress health, EWMA latency, and refusals" },
+  { path: "/activity", label: "Activity", icon: "Diagnostics", group: "Network & Flow",
+    title: "Request Activity", desc: "Live ring: per-request status, size, retries" },
+  { path: "/pipeline", label: "Pipeline", icon: "Pipeline", group: "Network & Flow",
+    title: "Pipeline", desc: "Target → … → Sink, per declared stage" },
+  { path: "/quality", label: "Data Quality", icon: "Audit", group: "Network & Flow",
+    title: "Data Quality", desc: "Extracted → written, with losses itemized" },
+  { path: "/events", label: "Event Stream", icon: "Diagnostics", group: "Network & Flow",
+    title: "Event Stream", desc: "Structured engine ring: /events with kind + since_seq" },
+
+  { path: "/storage", label: "Storage", icon: "Storage", group: "Data & Guardrails",
+    title: "Storage Observatory", desc: "Every configured lane, its existence and size" },
+  { path: "/alerts", label: "Alerts", icon: "Alerts", group: "Data & Guardrails",
+    title: "Alerts", desc: "SLO + lifecycle alerts with acknowledgement", badge: "alerts" },
+  { path: "/audit", label: "Audit & Ops", icon: "Audit", group: "Data & Guardrails",
+    title: "Audit Explorer", desc: "Sealed audit journal and operator feed" },
+  { path: "/diagnostics", label: "Diagnostics", icon: "Diagnostics", group: "Data & Guardrails",
+    title: "Diagnostics", desc: "Component-by-component verdict, copyable" },
+  { path: "/delivery", label: "Delivery Verify", icon: "Download", group: "Data & Guardrails",
+    title: "Delivery Verify", desc: "In-browser manifest digest check — CLI verify stays the authority" },
+
+  { path: "/config", label: "Configuration", icon: "Config", group: "Console",
+    title: "Configuration Studio", desc: "The real config document, redacted — edit a draft, never the server" },
+  { path: "/api", label: "API Reference", icon: "Api", group: "Console",
+    title: "API Explorer", desc: "Read-only map of the engine admin API — routes, auth, params" },
+  { path: "/config-diff", label: "Config Diff", icon: "Config", group: "Console",
+    title: "Config Diff", desc: "Read-only canonicalized compare of two pasted config documents" },
+
+  { path: "/export", label: "Export Center", icon: "Download", group: "Delivery",
+    title: "Export Center", desc: "Filter, preview, format, prepare and verify a delivery" },
+  { path: "/crawl", label: "Crawl Studio", icon: "Pipeline", group: "Delivery",
+    title: "Crawl Studio", desc: "Compose a bounded crawl plan against the engine's own limits" },
+  { path: "/ai", label: "AI Assist", icon: "Info", group: "Delivery",
+    title: "AI Assist", desc: "Optional assisted extraction — off by default, never authoritative" },
+  { path: "/control", label: "Control Jobs", icon: "Monitor", group: "Delivery",
+    title: "Control Jobs", desc: "Submit one bounded command, then watch the server's job" },
+  { path: "/control/job", label: "Control Job", icon: "Runs", group: "Delivery",
+    title: "Control Job", desc: "One control-plane job: /control/job?job=<job-id>" },
+  { path: "/artifacts", label: "Artifacts", icon: "Download", group: "Data & Guardrails",
+    title: "Artifacts", desc: "What jobs produced, verified against the server's manifest" },
+];

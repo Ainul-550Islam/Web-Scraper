@@ -1,0 +1,100 @@
+{
+  "uid": "harvest-overview",
+  "title": "Harvest Data Engine — Overview",
+  "tags": ["harvest", "data-engine"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Records written",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(harvest_records_written)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Pages fetched",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(harvest_pages_fetched)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Deduped",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(harvest_records_deduped)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Backoff honored (min)",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(harvest_backoff_sleep_ms_total) / 60000" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "m", "decimals": 1 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request throughput & retries",
+      "description": "requests total vs retried vs blocked. A healthy compliant run keeps blocked near zero by pacing, not by trickery.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "rate(harvest_requests_total[5m])", "legendFormat": "req/s" },
+        { "refId": "B", "expr": "rate(harvest_requests_retry[5m])", "legendFormat": "retries/s" },
+        { "refId": "C", "expr": "rate(harvest_requests_blocked[5m])", "legendFormat": "blocked/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Politeness pressure",
+      "description": "time budget spent waiting on rate policy + robots denials. High values = working as designed.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "rate(harvest_politeness_sleeps[5m])", "legendFormat": "rate-limit sleeps/s" },
+        { "refId": "B", "expr": "rate(harvest_robots_denials[5m])", "legendFormat": "robots denials/s" },
+        { "refId": "C", "expr": "rate(harvest_domains_abandoned[5m])", "legendFormat": "domains abandoned/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Yield",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "rate(harvest_pages_fetched[10m])", "legendFormat": "pages/min" },
+        { "refId": "B", "expr": "rate(harvest_records_written[10m]) * 60", "legendFormat": "records/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Extraction quality",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "rate(harvest_records_extracted[10m]) * 60", "legendFormat": "extracted/min" },
+        { "refId": "B", "expr": "rate(harvest_records_deduped[10m]) * 60", "legendFormat": "deduped/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ]
+}

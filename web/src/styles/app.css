@@ -1,0 +1,17 @@
+/* app.css — design-system layers, split one file per concern under styles/app/.
+   Order is load-bearing: tokens → structure → components → states.
+*/
+@import "./app/00-tokens.css";
+@import "./app/01-typography-roles.css";
+@import "./app/02-app-shell.css";
+@import "./app/03-sidebar.css";
+@import "./app/04-top-bar.css";
+@import "./app/05-status-bar.css";
+@import "./app/06-cards.css";
+@import "./app/07-status-language.css";
+@import "./app/08-buttons.css";
+@import "./app/09-forms.css";
+@import "./app/10-tables.css";
+@import "./app/11-misc-states.css";
+@import "./app/12-health-grid-pipeline.css";
+@import "./app/13-responsive.css";

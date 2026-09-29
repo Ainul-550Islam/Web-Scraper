@@ -1,0 +1,332 @@
+{
+  "artifacts": [
+    {
+      "bytes": 237,
+      "content_type": "text/plain; charset=utf-8",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-1",
+      "job": "job-1",
+      "name": "checksums.txt",
+      "role": "checksums",
+      "sha256": "8f214ba9bb14d60dad505bbc4fa57b9f32be21077def879e3939af1311a1c600",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    },
+    {
+      "bytes": 1245,
+      "content_type": "application/json",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-2",
+      "job": "job-1",
+      "name": "manifest.json",
+      "role": "manifest",
+      "sha256": "3ef886434ea007bc2e25d6590d9ceab83c24b6ea1129806d1cdca558ad69718b",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    },
+    {
+      "bytes": 680,
+      "content_type": "text/csv; charset=utf-8",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-3",
+      "job": "job-1",
+      "name": "records.csv",
+      "role": "payload",
+      "sha256": "3c6d4ea4602ef399ae6cb6574fa5e76c64f463923679f954efa47d44e26ad25c",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    },
+    {
+      "bytes": 1027,
+      "content_type": "application/x-ndjson",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-4",
+      "job": "job-1",
+      "name": "records.jsonl",
+      "role": "payload",
+      "sha256": "0b5982a6d73fcc78e50babfac548ea296edd63ecaabeb7f8233bbc9b8fb9ee11",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    },
+    {
+      "bytes": 6816,
+      "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-5",
+      "job": "job-1",
+      "name": "records.xlsx",
+      "role": "payload",
+      "sha256": "8e3f8b5b6df8dcdfc1a1e1df25e0e61e26f8277137a05c7d9677d1a443c7f918",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    },
+    {
+      "bytes": 11650,
+      "content_type": "application/zip",
+      "created_ts": 1790066829,
+      "downloadable": true,
+      "id": "art-6",
+      "job": "job-1",
+      "name": "records.zip",
+      "role": "bundle",
+      "sha256": "c377c6cbc19473da7d69fd5042df4eea250fb375e4f8a1bb80f2c7eed93973da",
+      "state": "ready",
+      "verification": {
+        "files": 4,
+        "records": 4,
+        "records_basis": "jsonl-lines",
+        "state": "ok"
+      }
+    }
+  ],
+  "audit_ref": "audit:req-00013e8a51507a1a",
+  "cancel_requested": false,
+  "command": "cmd-1",
+  "corr": "req-00013e8a51507a1a",
+  "counters": {
+    "blocked": 0,
+    "failures": 0,
+    "pages_fetched": 0,
+    "quarantined": 0,
+    "records_deduped": 0,
+    "records_extracted": 4,
+    "records_written": 4,
+    "requests_total": 0,
+    "retries": 0,
+    "schema_drifts": 0
+  },
+  "created_ts": 1790066829,
+  "deadline_ts": 1790067729,
+  "error": null,
+  "events": [
+    {
+      "detail": {
+        "deadline_ts": 1790067729,
+        "op": "export"
+      },
+      "kind": "queued",
+      "ts": 1790066829
+    },
+    {
+      "detail": {},
+      "kind": "started",
+      "ts": 1790066829
+    },
+    {
+      "detail": {
+        "error": ""
+      },
+      "kind": "completed",
+      "ts": 1790066829
+    }
+  ],
+  "id": "job-1",
+  "limits": {
+    "max_ai_input_bytes": 1048576,
+    "max_depth": 1,
+    "max_export_bytes": 268435456,
+    "max_pages": 100,
+    "max_records": 100000,
+    "timeout_secs": 900
+  },
+  "operation": "export",
+  "resource": "csv,jsonl,xlsx,zip",
+  "result": {
+    "artifacts": [
+      {
+        "bytes": 237,
+        "content_type": "text/plain; charset=utf-8",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-1",
+        "job": "job-1",
+        "name": "checksums.txt",
+        "role": "checksums",
+        "sha256": "8f214ba9bb14d60dad505bbc4fa57b9f32be21077def879e3939af1311a1c600",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      },
+      {
+        "bytes": 1245,
+        "content_type": "application/json",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-2",
+        "job": "job-1",
+        "name": "manifest.json",
+        "role": "manifest",
+        "sha256": "3ef886434ea007bc2e25d6590d9ceab83c24b6ea1129806d1cdca558ad69718b",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      },
+      {
+        "bytes": 680,
+        "content_type": "text/csv; charset=utf-8",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-3",
+        "job": "job-1",
+        "name": "records.csv",
+        "role": "payload",
+        "sha256": "3c6d4ea4602ef399ae6cb6574fa5e76c64f463923679f954efa47d44e26ad25c",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      },
+      {
+        "bytes": 1027,
+        "content_type": "application/x-ndjson",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-4",
+        "job": "job-1",
+        "name": "records.jsonl",
+        "role": "payload",
+        "sha256": "0b5982a6d73fcc78e50babfac548ea296edd63ecaabeb7f8233bbc9b8fb9ee11",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      },
+      {
+        "bytes": 6816,
+        "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-5",
+        "job": "job-1",
+        "name": "records.xlsx",
+        "role": "payload",
+        "sha256": "8e3f8b5b6df8dcdfc1a1e1df25e0e61e26f8277137a05c7d9677d1a443c7f918",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      },
+      {
+        "bytes": 11650,
+        "content_type": "application/zip",
+        "created_ts": 1790066829,
+        "downloadable": true,
+        "id": "art-6",
+        "job": "job-1",
+        "name": "records.zip",
+        "role": "bundle",
+        "sha256": "c377c6cbc19473da7d69fd5042df4eea250fb375e4f8a1bb80f2c7eed93973da",
+        "state": "ready",
+        "verification": {
+          "files": 4,
+          "records": 4,
+          "records_basis": "jsonl-lines",
+          "state": "ok"
+        }
+      }
+    ],
+    "delivery": "job-1",
+    "files": [
+      {
+        "bytes": 237,
+        "name": "checksums.txt",
+        "role": "checksums",
+        "sha256": "8f214ba9bb14d60dad505bbc4fa57b9f32be21077def879e3939af1311a1c600"
+      },
+      {
+        "bytes": 1245,
+        "name": "manifest.json",
+        "role": "manifest",
+        "sha256": "3ef886434ea007bc2e25d6590d9ceab83c24b6ea1129806d1cdca558ad69718b"
+      },
+      {
+        "bytes": 680,
+        "name": "records.csv",
+        "role": "payload",
+        "sha256": "3c6d4ea4602ef399ae6cb6574fa5e76c64f463923679f954efa47d44e26ad25c"
+      },
+      {
+        "bytes": 1027,
+        "name": "records.jsonl",
+        "role": "payload",
+        "sha256": "0b5982a6d73fcc78e50babfac548ea296edd63ecaabeb7f8233bbc9b8fb9ee11"
+      },
+      {
+        "bytes": 6816,
+        "name": "records.xlsx",
+        "role": "payload",
+        "sha256": "8e3f8b5b6df8dcdfc1a1e1df25e0e61e26f8277137a05c7d9677d1a443c7f918"
+      },
+      {
+        "bytes": 11650,
+        "name": "records.zip",
+        "role": "bundle",
+        "sha256": "c377c6cbc19473da7d69fd5042df4eea250fb375e4f8a1bb80f2c7eed93973da"
+      }
+    ],
+    "formats": [
+      "csv",
+      "jsonl",
+      "xlsx",
+      "zip"
+    ],
+    "records": 4,
+    "total_bytes": 21655,
+    "unique_urls": 4,
+    "verification": {
+      "files": 4,
+      "records": 4,
+      "records_basis": "jsonl-lines",
+      "state": "ok"
+    }
+  },
+  "state": "completed",
+  "updated_ts": 1790066829
+}

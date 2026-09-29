@@ -1,0 +1,1 @@
+{"per_target":[{"enforce":"off","schema_fields":0,"target":"demo-catalog","transform_ops":0},{"enforce":"off","schema_fields":0,"target":"demo-news","transform_ops":0}],"pipeline_failures":0,"quarantined":0,"schema_drifts":0,"written":2}

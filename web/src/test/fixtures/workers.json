@@ -1,0 +1,1 @@
+{"snapshot":{"busy":2,"deaths":0,"draining":false,"registered":2,"total_restarts":1,"utilization":1.0,"workers":[{"id":0,"idle_secs":1,"jobs_done":1,"jobs_failed":0,"restarts":0,"state":"running"},{"id":1,"idle_secs":1,"jobs_done":0,"jobs_failed":0,"restarts":1,"state":"running"}]},"state":"healthy"}

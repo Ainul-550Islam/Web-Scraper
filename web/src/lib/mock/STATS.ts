@@ -1,0 +1,26 @@
+// STATS — split from mock.ts; barrel re-exports keep every public path & name
+
+import type * as T from "../types";
+
+
+export const STATS: T.StatsResponse = {
+  running: true,
+  metrics: {
+    alerts_fired: 0, alerts_notified: 0, api_request_ms_total: 3, api_requests_2xx: 9,
+    api_requests_4xx: 0, api_requests_5xx: 0, api_requests_total: 9,
+    backoff_sleep_ms_total: 0, breaker_rejected: 0, budget_denied_proxy: 0,
+    budget_denied_records: 0, budget_denied_total: 0, checkpoints_written: 0,
+    domains_abandoned: 0, jobs_completed: 4, jobs_failed: 0, pages_fetched: 5,
+    pipeline_failures: 0, politeness_permits: 5, politeness_sleeps: 12,
+    queue_rejected: 0, records_deduped: 0, records_extracted: 5,
+    records_quarantined: 0, records_written: 5, request_ms_total: 8,
+    requests_blocked: 0, requests_ok: 10, requests_retry: 0,
+    requests_revalidated: 0, requests_total: 10, retry_budget_denied: 0,
+    robots_cache_hits: 4, robots_denials: 1, robots_fetches: 1, schema_drifts: 0,
+    storage_write_ms_total: 0, storage_writes: 5,
+    target_records_written: { "demo-catalog": 4, "demo-news": 1 },
+  },
+  proxies: [
+    { id: "direct", requests: 21, failures: 0, inflight: 0, latency_ewma_ms: 9.4, success_ewma: 1.0, region: null },
+  ],
+};

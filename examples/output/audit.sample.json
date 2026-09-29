@@ -1,0 +1,52 @@
+{
+  "hosts": {
+    "127.0.0.1": {
+      "backoff_ms": 0,
+      "blocked": {},
+      "breaker_abandons": 0,
+      "not_found404": 0,
+      "ok200": 5,
+      "policy": {
+        "burst": 2,
+        "min_interval_ms": 500,
+        "requests_per_sec": 1.0
+      },
+      "records_written": 4,
+      "requests": 5,
+      "revalidated304": 0,
+      "robots": {
+        "crawl_delay_ms": 1000,
+        "denials": 1,
+        "fetched": 1,
+        "present": true
+      },
+      "transport_errors": 0,
+      "wait_permits": 0,
+      "wait_sleeps": 5,
+      "wait_slept_ms": 5998
+    }
+  },
+  "policy_sha256": "6982dedc0bf3f8940fd52c10425048f41d828cbd9b308955d66d3e9e3bd788b1",
+  "respect_robots": true,
+  "run": "smoke-attest",
+  "totals": {
+    "backoff_ms": 0,
+    "blocked": 0,
+    "not_found404": 0,
+    "ok200": 5,
+    "records_written": 4,
+    "requests": 5,
+    "revalidated304": 0,
+    "robots_denials": 1,
+    "robots_fetched": 1,
+    "transport_errors": 0,
+    "wait_sleeps": 5,
+    "wait_slept_ms": 5998
+  },
+  "user_agent": "harvest-smoke/0.9 (contact: ops@example.com)",
+  "v": 1,
+  "window": {
+    "end_ts": 1789664071,
+    "start_ts": 1789664067
+  }
+}

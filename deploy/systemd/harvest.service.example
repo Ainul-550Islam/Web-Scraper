@@ -1,0 +1,28 @@
+# systemd unit for the engine + bundled console (docs/deployment.md).
+# Install as root; adjust User/ExecStart paths. The console is served by the
+# engine itself (`harvest serve web/dist`), so one unit covers both.
+[Unit]
+Description=harvest crawler engine + console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harvest
+Group=harvest
+WorkingDirectory=/var/lib/harvest
+ExecStart=/usr/local/bin/harvest serve /var/lib/harvest/web/dist --config /etc/harvest/config.json
+Restart=always
+RestartSec=2
+Environment=HARVEST_ADMIN_TOKEN_FILE=/etc/harvest/token
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/harvest
+# The admin API is read-only (no write endpoints exist); binding loopback
+# keeps it local. Open via the nginx /api proxy instead (docs/deployment.md).
+ExecStartPre=/bin/sh -c 'test -r /etc/harvest/config.json'
+
+[Install]
+WantedBy=multi-user.target

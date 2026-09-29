@@ -1,0 +1,33 @@
+/* ── app shell ────────────────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  grid-template-rows: var(--topbar) minmax(0, 1fr) var(--statusbar);
+  grid-template-areas:
+    "rail top"
+    "rail main"
+    "rail status";
+  height: 100dvh;
+}
+.shell[data-collapsed="true"] {
+  grid-template-columns: var(--rail-collapsed) minmax(0, 1fr);
+}
+
+.main {
+  grid-area: main;
+  overflow: auto;
+  padding: var(--s-5) var(--s-6) var(--s-7);
+  background:
+    radial-gradient(
+      1200px 400px at 70% -10%,
+      color-mix(in srgb, var(--accent) 4%, transparent),
+      transparent 60%
+    ),
+    var(--bg-0);
+}
+.main-inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  display: grid;
+  gap: var(--s-5);
+}

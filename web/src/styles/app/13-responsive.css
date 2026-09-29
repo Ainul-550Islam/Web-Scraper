@@ -1,0 +1,111 @@
+/* ── responsive ───────────────────────────────────────────────── */
+@media (max-width: 1180px) {
+  .grid-metrics {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  }
+}
+@media (max-width: 920px) {
+  .shell,
+  .shell[data-collapsed="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "top"
+      "main"
+      "status";
+  }
+  .rail {
+    position: fixed;
+    z-index: 88;
+    inset: 0 auto 0 0;
+    width: var(--rail);
+    transform: translateX(-102%);
+    transition: transform var(--t-med) var(--ease-out);
+    box-shadow: var(--shadow-3);
+  }
+  .rail[data-open="true"] {
+    transform: none;
+  }
+  .shell[data-collapsed="true"] .rail-word,
+  .shell[data-collapsed="true"] .rail-env,
+  .shell[data-collapsed="true"] .nav-label,
+  .shell[data-collapsed="true"] .nav-badge,
+  .shell[data-collapsed="true"] .nav-group-title {
+    display: revert;
+  }
+  .search-launcher {
+    min-width: 0;
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+  .search-launcher span,
+  .search-launcher .kbd {
+    display: none;
+  }
+  .main {
+    padding: var(--s-4);
+  }
+  table.data {
+    display: block;
+  }
+  .data thead {
+    display: none;
+  }
+  .data tbody tr {
+    display: grid;
+    gap: 2px;
+    padding: var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    margin: var(--s-2) 0;
+    background: var(--bg-2);
+  }
+  .data tbody td {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--s-3);
+    border: 0;
+    padding: 1px var(--s-2);
+  }
+  .data tbody td::before {
+    content: attr(data-col);
+    color: var(--text-3);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .data .num {
+    text-align: right;
+  }
+  .drawer {
+    width: 100vw;
+    top: auto;
+    height: min(82dvh, 100%);
+    border-left: 0;
+    border-top: 1px solid var(--line-strong);
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    animation: sheet-in var(--t-med) var(--ease-out);
+  }
+  @keyframes sheet-in {
+    from {
+      transform: translateY(12px);
+      opacity: 0.5;
+    }
+  }
+  .kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .kv dd {
+    margin-bottom: var(--s-2);
+  }
+  .funnel-row {
+    grid-template-columns: 110px minmax(0, 1fr) 64px;
+  }
+}
+
+/* mobile nav toggle visibility */
+.mobile-only { display: none !important; }
+@media (max-width: 920px) {
+  .mobile-only { display: inline-flex !important; }
+}

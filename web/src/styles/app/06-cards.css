@@ -1,0 +1,109 @@
+/* ── cards ────────────────────────────────────────────────────── */
+.card {
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+  transition:
+    border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+.card--hover:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-2);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--line-faint);
+}
+.card-head .spacer {
+  margin-left: auto;
+}
+.card-body {
+  padding: var(--s-4);
+}
+.card-foot {
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--line-faint);
+  display: flex;
+  gap: var(--s-3);
+  align-items: center;
+}
+
+.grid {
+  display: grid;
+  gap: var(--s-4);
+}
+.grid-metrics {
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+}
+.grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+}
+.grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+/* metric card */
+.metric {
+  padding: var(--s-4);
+  display: grid;
+  gap: var(--s-2);
+}
+.metric .metric-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.metric .metric-value {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+.metric .metric-value small {
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.metric .metric-meta {
+  display: flex;
+  gap: var(--s-3);
+  align-items: center;
+  min-height: 18px;
+}
+.metric-delta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.metric-delta.up {
+  color: var(--ok);
+}
+.metric-delta.down {
+  color: var(--err);
+}
+.metric-delta.flat {
+  color: var(--text-3);
+}
+.metric-value .bump {
+  animation: bump var(--t-med) var(--ease-out);
+}
+@keyframes bump {
+  0% {
+    transform: translateY(3px);
+    opacity: 0.4;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .metric-value .bump {
+    animation: none;
+  }
+}

@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: harvest
+    # If the harvest config sets admin_token, the scrape must present it.
+    # Prometheus expands $VAR from its process environment (compose passes
+    # HARVEST_ADMIN_TOKEN through). Unset => empty bearer, which is ignored
+    # by a token-less server and 401s against a tokened one (fail closed).
+    authorization:
+      credentials: "$HARVEST_ADMIN_TOKEN"
+    static_configs:
+      - targets: ["harvest:9678"]

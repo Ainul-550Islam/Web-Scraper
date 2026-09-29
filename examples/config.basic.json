@@ -1,0 +1,27 @@
+{
+  "_note": "Basic: crawl the bundled demo mock end-to-end. Start it first: python3 demo/server.py 8099 &  Then: cargo run --release -- run --config examples/config.basic.json  (admin dashboard: http://127.0.0.1:9678/ while a run/serve is live; no token needed on loopback).",
+  "name": "harvest-basic",
+  "user_agent": "harvest-example/0.9 (compliant data engine; contact: data@example.com)",
+  "respect_robots": true,
+  "concurrency": 2,
+  "request_timeout_secs": 15,
+  "max_response_bytes": 4194304,
+  "max_pages": 40,
+  "default_policy": { "requests_per_sec": 2.0, "burst": 2, "min_interval_ms": 300 },
+  "targets": [
+    {
+      "id": "shop",
+      "start_url": "http://127.0.0.1:8099/index.html",
+      "follow_links": true,
+      "max_depth": 1,
+      "include": ["/product/"],
+      "max_pages": 10,
+      "extract": {
+        "title": { "css": "h1" },
+        "price": { "css": "p.price" }
+      }
+    }
+  ],
+  "output": { "kind": "jsonl", "path": "out/basic.jsonl" },
+  "metrics_addr": "127.0.0.1:9678"
+}

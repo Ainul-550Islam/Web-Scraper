@@ -1,0 +1,77 @@
+[package]
+# buyer package contents (review with: cargo package --list)
+include = [
+  "/src",
+  "/examples",
+  "/tests",
+  "/benches",
+  "/docs",
+  "/demo",
+  "/tools",
+  "/web/src",
+  "/web/README.md",
+  "/Makefile",
+  "/Dockerfile",
+  "/web/Dockerfile",
+  "/ops",
+  "/.github",
+  "/web/e2e",
+  "/build.rs",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/web/package.json",
+  "/web/package-lock.json",
+  "/web/tsconfig.json",
+  "/web/vite.config.ts",
+  "/web/vitest.config.ts",
+  "/web/index.html",
+]
+name = "harvest"
+version = "0.10.0"
+edition = "2021"
+description = "Compliance-first async data-collection engine in Rust: polite scheduling, per-domain rate limiting, robots.txt enforcement, proxy failover, typed extraction, JSONL/SQLite sinks, Prometheus metrics."
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "signal", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip", "brotli", "deflate", "charset", "json", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = { version = "2", features = ["serde"] }
+scraper = "0.20"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+sha2 = "0.10"
+hmac = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp"] }
+# tiny, already in the transitive tree (tokio/socket2); used solely to
+# restore unix SIGPIPE semantics in main() (see tests/cli.rs)
+libc = "0.2"
+regex = "1"
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:tokio-postgres"]
+redis = ["dep:redis"]
+# Test harness surface (`harvest::testutil`). Never enabled by builds of
+# downstream users; enabled for integration tests via the dev-dependency on
+# this very package below.
+devtools = []
+
+[dev-dependencies]
+harvest = { path = ".", features = ["devtools"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[[bench]]
+name = "throughput"
+harness = false
