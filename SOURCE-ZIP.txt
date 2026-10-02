@@ -1,0 +1,8 @@
+harvest 0.10.0 — clean source snapshot
+generated: 2026-09-29 07:20:47
+source files: 862
+includes .git/ (one commit) so it can be pushed directly:
+  git remote add origin <url> && git push -u origin main
+remove history with: rm -rf .git
+restore dependencies:  cd web && npm ci
+excluded (build output, regenerate locally): target/ out/ artifacts/ web/dist/ web/node_modules/
