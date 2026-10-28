@@ -27,6 +27,38 @@ fn snapshot_shape_is_stable_and_self_describing() {
     assert_eq!(v2["events"]["last_seq"], 1);
 }
 
+#[tokio::test]
+async fn events_log_persists_redacted_urls_to_a_private_file() {
+    let dir = std::env::temp_dir().join(format!("harvest-events-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nested/events.jsonl");
+    let bus = crate::events::Bus::new(16);
+    bus.publish(
+        EventKind::JobStarted,
+        Some(1),
+        json!({"url":"https://alice:pw@example.test/private?token=secret"}),
+    );
+    bus.close();
+
+    assert_eq!(events_log_writer(bus, path.clone()).await.unwrap(), 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("alice"));
+    assert!(!text.contains("pw"));
+    assert!(!text.contains("private"));
+    assert!(!text.contains("secret"));
+    assert!(text.contains("https://example.test"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn breakers_lazy_and_shared_per_host() {
     let mut c = cfg();

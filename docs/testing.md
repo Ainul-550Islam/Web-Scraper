@@ -1,23 +1,21 @@
 # Testing strategy (measured, not aspirational)
 
-Every number on this page is reproducible with the commands shown; the tree it
-describes is 787 tracked files as of the current HEAD.
+The commands below reproduce the measured test results for the reviewed tree.
+Live Redis and PostgreSQL cases need their opt-in test environment variables; without them, those integration cases report their documented skips.
 
 ## The matrix
 
 | Layer | Runner | Command | Reality check |
 |-------|--------|---------|---------------|
-| Engine unit tests | `cargo test --lib` | `cargo test --lib --all-features` | 356 unit tests (default features; the per-module `src/<m>/tests.rs` pairs of docs/adr/0011 plus inline `mod tests` in the flat operational modules added this wave) |
-| Engine full suite | `cargo test` | `tests/` dir (30 files incl. `examples.rs`, `route_contract.rs`, `repo_integrity.rs`, `runtime_health.rs`, `search_contract.rs`, `artifact_integrity.rs`, `policy_regression.rs`, `final_release.rs`, `crawl_discovery.rs`, `ai_pipeline.rs`, `export_formats.rs`,
-  `content_integrity.rs`, `control_plane.rs`, `remote_crawl.rs`, `remote_export.rs`, `remote_ai.rs`,
-  `artifact_download.rs`) | 655 tests default / 669 `--all-features`: CLI exit codes, budget floors, dist serving, health-lane parity, query contracts, artifact states, policy decision table, and a full pipeline release smoke on a mock origin |
+| Engine unit tests | Cargo | `cargo test --lib --all-features` | 525 library tests passed in the current all-feature test run |
+| Engine full suite | Cargo | `cargo test --all-targets --all-features` | 728 tests passed with live Redis and PostgreSQL enabled; without the opt-in service variables, their integration cases report skips |
 | Console types | `tsc` | `cd web && npx tsc --noEmit` | strict mode, `noUncheckedIndexedAccess`, zero escapes |
 | Console lint | `eslint` | `cd web && npx eslint .` | 0 errors, 0 warnings (barrel override is scoped, not global) |
-| Console unit/dom | `vitest` | `cd web && npx vitest run` | 351 tests across 124 files — one file per unit: pages, ux, api, resilience, every UI primitive, every endpoint, every hook (incl. `export-center`, `ai-assist`, `crawl-studio`, `control-jobs`, `control-job-detail`, `artifacts`) |
+| Console unit/dom | Vitest | `cd web && npm test` | 368 tests across 126 files — pages, UX, API, resilience, UI primitives, endpoints, and hooks |
 | Build invariants | `vite build` | `cd web && npm run build` | one chunk per route asserted; demo bytes excluded from prod |
 | End-to-end smoke | node script | `cd web && npm run smoke` | serves real `dist/` against live `harvest serve` :9678, 12 checks |
 | Buyer flow E2E | node script | `cd web && npm run e2e:buyer` | 18 checks: spawns demo mock site + `harvest serve` + vite preview, asserts proxy-routed API honesty, then real CLI export → manifest → verify and graceful SIGINT exit 0 |
-| Docs integrity | python script | `make links` (`tools/check_links.py .`) | 247 relative links, 0 broken |
+| Docs integrity | Python script | `make links` (`tools/check_links.py .`) | 302 relative links, 0 broken |
 
 ## What the vitest suites are split by
 
@@ -58,7 +56,8 @@ in place of a real module unless the suite says so in its header comment.
 - `tests/route_contract.rs` — parses every `("METHOD", "/path")` arm in
   `src/admin.rs` and every row of `web/src/lib/apiRoutes/API_ROUTES.ts`; the
   two sets must be identical, open routes are exactly `/health` + `/live`,
-  and POST exists only for `/alerts/ack` and `/ops/note`.
+  and POST exists only for `/alerts/ack`, `/ops/note`, `/control/crawl`,
+  `/control/export`, `/control/ai`, and `/control/jobs/:id/cancel`.
 - `tests/repo_integrity.rs` — buyer-package gate: promised files exist, every
   module dir has `tests.rs`, console route count == `docs/pages/` guide
   count, fixtures corpus ≥ 20, `[package] include` is explicit.
@@ -70,7 +69,7 @@ in place of a real module unless the suite says so in its header comment.
 
 `web/src/test/fixtures/*.json` were captured from a running engine
 (docs/adr/0004). `types.ts` must keep parsing them or tsc fails — that is the
-drift tripwire. To regenerate: run `cargo run -- serve web/dist`, then hit
+drift tripwire. To regenerate: run `cargo run -- serve --config examples/config.basic.json`, then hit
 each endpoint with the token and save the raw body. No hand-typed fixtures,
 ever.
 

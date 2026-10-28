@@ -33,7 +33,7 @@ not quietly rewritten:
 | depth | 20 | `crawl::MAX_DEPTH_CEILING` |
 | pages | 1 000 000 | `crawl::MAX_PAGES_CEILING` |
 | links per page | 10 000 | `crawl::MAX_LINKS_PER_PAGE_CEILING` |
-| response bytes | 64 MiB warning | `crawl::CrawlCfg::max_response_bytes` |
+| response bytes | 64 MiB hard cap; cap × effective workers ≤ 1 GiB | `crawl::CrawlCfg::max_response_bytes` |
 
 Warnings (non-blocking) cover: page budgets above 10 000 without a matching rate
 limit, depths above 6, and include/exclude overlap — because exclude is evaluated

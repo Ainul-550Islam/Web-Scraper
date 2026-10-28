@@ -38,13 +38,7 @@ pub fn history_entry(cfg: &Config, summary: &Summary, status: &str) -> Value {
 /// Append one line to the JSONL history log (creates parents as needed).
 pub fn record_history(cfg: &Config, entry: &Value) -> Result<()> {
     let path = &cfg.schedule.history_path;
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p).ok();
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut f = crate::fsutil::open_append(path)?;
     writeln!(f, "{entry}")?;
     Ok(())
 }
@@ -64,6 +58,9 @@ pub async fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<usize> {
     ));
     state.attach_runtime(runtime_slot.clone());
     state.with_config(cfg.clone(), cfg.source_path.clone());
+    let drain_task = state
+        .control()
+        .map(|control| control.drain_on_stop(stop.clone()));
     let admin_task = if cfg.metrics_addr.is_empty() {
         None
     } else {
@@ -99,7 +96,19 @@ pub async fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<usize> {
         state.set_running(false);
 
         let (entry, alert_summary, hard_err) = match outcome {
-            Ok(summary) => (history_entry(&cfg, &summary, "ok"), summary, None),
+            Ok(summary) => (
+                history_entry(
+                    &cfg,
+                    &summary,
+                    if stop.load(Ordering::Relaxed) {
+                        "cancelled"
+                    } else {
+                        "ok"
+                    },
+                ),
+                summary,
+                None,
+            ),
             Err(e) => {
                 let empty = Summary {
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -154,7 +163,13 @@ pub async fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<usize> {
         }
     }
 
+    if let Some(control) = state.control() {
+        control.drain().await;
+    }
     if let Some(t) = admin_task {
+        t.abort();
+    }
+    if let Some(t) = drain_task {
         t.abort();
     }
     state.record_ops("serve_stop", json!({"completed": completed}));

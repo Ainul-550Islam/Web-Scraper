@@ -164,48 +164,139 @@ impl AiJobResult {
     }
 }
 
-/// Turn the configured output into bounded [`AiField`]s.
-///
-/// Only the run output the config declares is read, only `record_limit`
-/// records are read, and only `field_limit` keys per record are taken. Values
-/// are stringified and clipped, so a 50 MB field cannot ride into a provider
-/// request.
+const AI_SOURCE_FILE_CAP: u64 = 64 * 1024 * 1024;
+const AI_SOURCE_LINE_CAP: usize = 1024 * 1024;
+const AI_SOURCE_VALUE_CAP: usize = 2_048;
+const AI_SOURCE_NAME_CAP: usize = 64;
+const MAX_AI_RESOLVED_FIELDS: usize = 10_000;
+
+/// A writer that retains only a bounded prefix while allowing a serializer to
+/// finish normally. This avoids allocating a huge intermediate string for a
+/// large JSON value in a source record.
+struct PrefixWriter {
+    bytes: Vec<u8>,
+    cap: usize,
+}
+impl std::io::Write for PrefixWriter {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let keep = self.cap.saturating_sub(self.bytes.len()).min(input.len());
+        if keep == 0 && !input.is_empty() {
+            return Err(std::io::Error::other("bounded prefix reached"));
+        }
+        self.bytes.extend_from_slice(&input[..keep]);
+        Ok(keep)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn value_prefix(value: &Value, max_bytes: usize) -> String {
+    if let Some(text) = value.as_str() {
+        return clip(text, max_bytes);
+    }
+    let mut writer = PrefixWriter {
+        bytes: Vec::with_capacity(max_bytes),
+        cap: max_bytes,
+    };
+    let _ = serde_json::to_writer(&mut writer, value);
+    clip(&String::from_utf8_lossy(&writer.bytes), max_bytes)
+}
+
+fn read_capped_line<R: std::io::BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<usize> {
+    line.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(line.len());
+        }
+        let end = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        if line.len().saturating_add(end) > cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AI source line exceeds the 1 MiB cap",
+            ));
+        }
+        let complete = available.get(end.saturating_sub(1)) == Some(&b'\n');
+        line.extend_from_slice(&available[..end]);
+        reader.consume(end);
+        if complete {
+            return Ok(line.len());
+        }
+    }
+}
+
+/// Turn a configured JSONL output into bounded [`AiField`]s. The file, line,
+/// record, field, name and value limits are enforced before data is cloned
+/// into the provider request.
 pub fn fields_from_run_output(
     path: &Path,
     record_limit: usize,
     field_limit: usize,
 ) -> Result<Vec<AiField>, String> {
-    use std::io::BufRead;
-    let fh = std::fs::File::open(path)
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| "configured output path needs a filename".to_string())?;
+    let file = crate::fsutil::open_within(parent, &parent.join(name), false)
         .map_err(|e| format!("cannot read the configured output file: {e}"))?;
+    if file
+        .metadata()
+        .map_err(|e| format!("cannot stat the configured output file: {e}"))?
+        .len()
+        > AI_SOURCE_FILE_CAP
+    {
+        return Err("configured output exceeds the 64 MiB AI source file cap".into());
+    }
+    let mut reader = std::io::BufReader::new(crate::source_io::CappedReader::new(
+        file,
+        AI_SOURCE_FILE_CAP,
+    ));
     let mut out: Vec<AiField> = Vec::new();
-    for (i, line) in std::io::BufReader::new(fh).lines().enumerate() {
-        if i >= record_limit {
+    let record_limit = record_limit.min(crate::control::MAX_AI_FIELDS);
+    let field_limit = field_limit.min(crate::control::MAX_AI_FIELDS);
+    let mut line = Vec::new();
+    for index in 0..record_limit {
+        let len = read_capped_line(&mut reader, &mut line, AI_SOURCE_LINE_CAP)
+            .map_err(|e| format!("cannot read the output file: {e}"))?;
+        if len == 0 {
             break;
         }
-        let line = line.map_err(|e| format!("cannot read the output file: {e}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let text = std::str::from_utf8(&line)
+            .map_err(|e| format!("output line {} is not UTF-8: {e}", index + 1))?;
+        if text.trim().is_empty() {
             continue;
         }
-        let v: Value = serde_json::from_str(trimmed)
-            .map_err(|e| format!("output line {} is not valid JSON: {e}", i + 1))?;
-        let obj = match v.get("fields").and_then(Value::as_object) {
-            Some(o) => o.clone(),
-            None => match v.as_object() {
-                Some(o) => o.clone(),
-                None => continue,
-            },
+        let value: Value = serde_json::from_str(text.trim())
+            .map_err(|e| format!("output line {} is not valid JSON: {e}", index + 1))?;
+        let object = value
+            .get("fields")
+            .and_then(Value::as_object)
+            .or_else(|| value.as_object());
+        let Some(object) = object else {
+            continue;
         };
-        for (k, val) in obj.iter().take(field_limit) {
-            let value = match val {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
+        for (key, field_value) in object.iter().take(field_limit) {
+            if out.len() >= MAX_AI_RESOLVED_FIELDS {
+                return Err(format!(
+                    "configured output exceeds the {MAX_AI_RESOLVED_FIELDS} resolved-field safety cap"
+                ));
+            }
+            let value = value_prefix(field_value, AI_SOURCE_VALUE_CAP);
             out.push(AiField {
-                name: k.clone(),
-                value: clip(&value, 2_048),
-                deterministic: Some(clip(&value, 2_048)),
+                name: clip(key, AI_SOURCE_NAME_CAP),
+                deterministic: Some(value.clone()),
+                value,
                 redacted: false,
             });
         }
@@ -216,15 +307,20 @@ pub fn fields_from_run_output(
     Ok(out)
 }
 
-fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect()
+/// Clip by UTF-8 byte count without splitting a code point.
+fn clip(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
     }
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
-/// Resolve the job's field set.
+/// Resolve the job's field set, enforcing the serialized AI budget while
+/// fields are added rather than after an unbounded vector has been built.
 pub fn resolve_fields(spec: &AiJobSpec, cfg: &Config) -> Result<Vec<AiField>, String> {
     match &spec.source {
         AiSource::RunOutput {
@@ -232,17 +328,95 @@ pub fn resolve_fields(spec: &AiJobSpec, cfg: &Config) -> Result<Vec<AiField>, St
             field_limit,
         } => {
             let files = crate::export_job::source_files(cfg).map_err(|e| e.message)?;
-            fields_from_run_output(&files[0], *record_limit, *field_limit)
+            let mut out = Vec::new();
+            let mut serialized_size = AiRequest {
+                task: spec.task,
+                fields: Vec::new(),
+                declared: Vec::new(),
+            }
+            .input_bytes();
+            let mut budget_exceeded = false;
+            let mut fields_exceeded = false;
+            let visit_result = crate::source_io::visit(
+                cfg,
+                &files,
+                (*record_limit).min(crate::control::MAX_AI_FIELDS) as u64,
+                |value| {
+                    let object = value
+                        .get("fields")
+                        .and_then(Value::as_object)
+                        .or_else(|| value.as_object())
+                        .ok_or_else(|| anyhow::anyhow!("record has no fields"))?;
+                    for (key, field_value) in object
+                        .iter()
+                        .take((*field_limit).min(crate::control::MAX_AI_FIELDS))
+                    {
+                        if out.len() >= MAX_AI_RESOLVED_FIELDS {
+                            fields_exceeded = true;
+                            anyhow::bail!(
+                                "resolved fields exceed the {MAX_AI_RESOLVED_FIELDS} safety cap"
+                            );
+                        }
+                        let value = value_prefix(field_value, AI_SOURCE_VALUE_CAP);
+                        let field = AiField {
+                            name: clip(key, AI_SOURCE_NAME_CAP),
+                            deterministic: Some(value.clone()),
+                            value,
+                            redacted: false,
+                        };
+                        let encoded_len = serde_json::to_vec(&field)?.len();
+                        let extra = encoded_len.saturating_add(usize::from(!out.is_empty()));
+                        let next_size = serialized_size.saturating_add(extra);
+                        if next_size as u64 > spec.max_input_bytes {
+                            budget_exceeded = true;
+                            anyhow::bail!("resolved source exceeds the configured AI input cap");
+                        }
+                        serialized_size = next_size;
+                        out.push(field);
+                    }
+                    Ok(())
+                },
+            );
+            if budget_exceeded {
+                return Err(format!(
+                    "budget-exceeded: AI source exceeds the {} byte input cap; reduce the record or field limit",
+                    spec.max_input_bytes
+                ));
+            }
+            if fields_exceeded {
+                return Err(format!(
+                    "AI source exceeds the {MAX_AI_RESOLVED_FIELDS} resolved-field safety cap"
+                ));
+            }
+            visit_result.map_err(|e| e.to_string())?;
+            if out.is_empty() {
+                return Err("the configured output holds no usable fields".into());
+            }
+            Ok(out)
         }
-        AiSource::Inline { fields } => Ok(fields
-            .iter()
-            .map(|f| AiField {
-                name: f.name.clone(),
-                value: f.value.clone(),
-                deterministic: f.deterministic.clone(),
-                redacted: false,
-            })
-            .collect()),
+        AiSource::Inline { fields } => {
+            if fields.len() > crate::control::MAX_AI_FIELDS {
+                return Err(format!(
+                    "inline AI source exceeds the {} field limit",
+                    crate::control::MAX_AI_FIELDS
+                ));
+            }
+            Ok(fields
+                .iter()
+                .map(|field| {
+                    let value = clip(&field.value, crate::control::MAX_AI_FIELD_VALUE_BYTES);
+                    AiField {
+                        name: clip(&field.name, AI_SOURCE_NAME_CAP),
+                        deterministic: field
+                            .deterministic
+                            .as_deref()
+                            .map(|text| clip(text, crate::control::MAX_AI_FIELD_VALUE_BYTES)),
+                        value,
+                        redacted: false,
+                    }
+                })
+                .collect())
+        }
     }
 }
 
@@ -259,8 +433,12 @@ pub fn run(spec: &AiJobSpec, cfg: &Config) -> AiJobResult {
     let fields = match resolve_fields(spec, cfg) {
         Ok(f) => f,
         Err(e) => {
+            let (state, reason) = match e.strip_prefix("budget-exceeded: ") {
+                Some(message) => (AiState::BudgetExceeded.as_str(), message.to_string()),
+                None => (AiState::Failed.as_str(), e),
+            };
             return AiJobResult {
-                state: AiState::Failed.as_str().to_string(),
+                state: state.to_string(),
                 task,
                 provider: provider_name,
                 model: status.model,
@@ -271,7 +449,7 @@ pub fn run(spec: &AiJobSpec, cfg: &Config) -> AiJobResult {
                 input_bytes: 0,
                 latency_ms: None,
                 suggestions: Vec::new(),
-                reason: Some(e),
+                reason: Some(reason),
             };
         }
     };

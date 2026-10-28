@@ -145,10 +145,7 @@ pub fn audit_report(cfg: &crate::config::Config) -> std::io::Result<Option<Value
     if meta.len() > MAX_SCAN_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "audit report larger than the {} byte read budget",
-                MAX_SCAN_BYTES
-            ),
+            format!("audit report larger than the {MAX_SCAN_BYTES} byte read budget"),
         ));
     }
     let raw = std::fs::read_to_string(&path)?;

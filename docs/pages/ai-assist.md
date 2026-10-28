@@ -10,8 +10,9 @@
 
 Review surface for the **optional** AI stage. Two documents can be loaded: the
 operator's provider configuration (shape: `harvest::ai::AiCfg`) and the stage's
-output (shape: `harvest::ai::schema::AiOutcome`). Both are read in-tab; the
-console has no AI endpoint and does not pretend to have one.
+output (shape: `harvest::ai::schema::AiOutcome`). Both are read in-tab; this review page does not call an AI endpoint. Bounded
+server-side AI jobs are a separate Control Jobs action using `POST /control/ai`;
+that route does not turn these local review decisions into engine mutations.
 
 ## The three rules the page enforces visually
 

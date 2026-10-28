@@ -351,6 +351,20 @@ fn ai_inline_fields_are_bounded() {
 }
 
 #[test]
+fn ai_run_output_limits_must_be_positive() {
+    for source in [
+        json!({"kind":"run_output","record_limit":0}),
+        json!({"kind":"run_output","field_limit":0}),
+    ] {
+        let raw = json!({"op":"ai","task":"classify","source":source});
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let error = ControlCommand::from_request("a", "c", &bytes, None).unwrap_err();
+        assert_eq!(error.status(), 400);
+        assert!(error.message.contains("at least 1"));
+    }
+}
+
+#[test]
 fn ai_run_output_without_config_is_unavailable() {
     let c = cmd(
         "ai",
@@ -544,4 +558,45 @@ fn control_errors_map_to_stable_statuses() {
         ControlError::unauthorized().message,
         crate::admin::UNAUTHORIZED_MESSAGE
     );
+}
+
+#[test]
+fn phase2_emit_restart_identity() {
+    if std::env::var("HARVEST_PHASE2_EMIT_ID").as_deref() == Ok("1") {
+        println!("RESTART-ID:{}:{}", ControlJobId::next(), ArtifactId::next());
+    }
+}
+
+#[test]
+fn phase2_fresh_processes_cannot_reissue_old_job_or_artifact_ids() {
+    let child = || {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "control::tests::phase2_emit_restart_identity",
+                "--nocapture",
+            ])
+            .env("HARVEST_PHASE2_EMIT_ID", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("RESTART-ID:"))
+            .unwrap()
+            .to_string()
+    };
+    let first = child();
+    let second = child();
+    assert_ne!(
+        first, second,
+        "server restart must not alias immutable directories or public artifact links"
+    );
+    let id = ControlJobId::next();
+    assert!(ControlJobId::parse(id.as_str()).is_some());
+    let id = ArtifactId::next();
+    assert!(ArtifactId::parse(id.as_str()).is_some());
+    assert!(ControlJobId::parse("job-../secret-1").is_none());
+    assert!(ArtifactId::parse("art-123-1").is_none());
 }

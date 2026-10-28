@@ -26,8 +26,9 @@
 //! response contains a filesystem path.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -204,8 +205,9 @@ pub fn safe_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .filter(|c| {
-            !matches!(c, '"' | '\\' | '/' | '\r' | '\n' | '\0')
-                && !((*c as u32) < 0x20 || *c as u32 == 0x7f)
+            !(matches!(c, '"' | '\\' | '/' | '\r' | '\n' | '\0')
+                || (*c as u32) < 0x20
+                || *c as u32 == 0x7f)
         })
         .collect();
     let cleaned = cleaned.trim().to_string();
@@ -305,14 +307,34 @@ impl std::fmt::Display for DownloadError {
 #[derive(Debug, Clone)]
 pub struct OpenedArtifact {
     pub record: ArtifactRecord,
-    path: PathBuf,
+    file: Arc<Mutex<std::fs::File>>,
+    max_bytes: u64,
 }
 
 impl OpenedArtifact {
     /// Read the whole file. Safe because `open` already verified the size
     /// against the cap and the path against the root.
     pub fn read(&self) -> Result<Vec<u8>, DownloadError> {
-        std::fs::read(&self.path).map_err(|_| DownloadError::path_violation())
+        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| DownloadError::path_violation())?;
+        let mut bytes = Vec::new();
+        (&mut *file)
+            .take(self.max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| DownloadError::path_violation())?;
+        if bytes.len() as u64 > self.max_bytes {
+            return Err(DownloadError::too_large(bytes.len() as u64, self.max_bytes));
+        }
+        if bytes.len() as u64 != self.record.bytes
+            || crate::control::sha256_hex(&bytes) != self.record.sha256
+        {
+            return Err(DownloadError {
+                kind: DownloadErrorKind::PathViolation,
+                message: "artifact bytes differ from the finalized size or SHA-256".to_string(),
+            });
+        }
+        Ok(bytes)
     }
     pub fn content_type(&self) -> &'static str {
         self.record.content_type
@@ -332,7 +354,7 @@ pub struct ArtifactStore {
 impl ArtifactStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
-            root,
+            root: std::fs::canonicalize(&root).unwrap_or(root),
             inner: Mutex::new(BTreeMap::new()),
         }
     }
@@ -364,10 +386,16 @@ impl ArtifactStore {
                 "artifact path is outside the control root",
             ));
         }
-        let bytes = std::fs::metadata(&path)
+        let path = std::fs::canonicalize(&path)
+            .map_err(|_| ControlError::conflict("artifact file is unreadable"))?;
+        let file = crate::fsutil::open_within(&self.root, &path, false).map_err(|_| {
+            ControlError::conflict("artifact must be a regular file inside the control root")
+        })?;
+        let bytes = file
+            .metadata()
             .map(|m| m.len())
             .map_err(|_| ControlError::conflict("artifact file is unreadable"))?;
-        let id = ArtifactId::next();
+        let id = ArtifactId::try_next()?;
         let content_type = content_type_for(&name);
         let rec = ArtifactRecord {
             id: id.as_str().to_string(),
@@ -383,11 +411,14 @@ impl ArtifactStore {
             created_ts: epoch_secs(),
             path,
         };
-        self.evict_if_needed();
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id.as_str().to_string(), rec);
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        Self::evict_if_needed(&mut g, rec.job.as_deref());
+        if g.len() >= MAX_ARTIFACTS {
+            return Err(ControlError::unavailable(
+                "artifact registry is at capacity",
+            ));
+        }
+        g.insert(id.as_str().to_string(), rec);
         Ok(id)
     }
 
@@ -442,6 +473,16 @@ impl ArtifactStore {
     }
 
     /// Fail every artifact still in `Writing` for a job whose run failed.
+    pub(crate) fn invalidate_job_artifacts(&self, job: &str, reason: &str) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        for rec in g.values_mut() {
+            if rec.job.as_deref() == Some(job) {
+                rec.state = ArtifactState::Failed;
+                rec.failure = Some(reason.to_string());
+            }
+        }
+    }
+
     pub fn fail_job_artifacts(&self, job: &str, reason: &str) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         for rec in g.values_mut() {
@@ -461,6 +502,15 @@ impl ArtifactStore {
     }
 
     /// Artifact ids belonging to a job, newest last.
+    /// Retention revokes metadata atomically. An already opened descriptor
+    /// remains pinned and may finish its in-progress transfer.
+    pub(crate) fn forget_job(&self, job: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, rec| rec.job.as_deref() != Some(job));
+    }
+
     pub fn for_job(&self, job: &str) -> Vec<ArtifactRecord> {
         self.inner
             .lock()
@@ -501,18 +551,22 @@ impl ArtifactStore {
         if !self.under_root(&rec.path) {
             return Err(DownloadError::path_violation());
         }
-        let meta = std::fs::metadata(&rec.path).map_err(|_| DownloadError::path_violation())?;
+        let file = crate::fsutil::open_within(&self.root, &rec.path, false)
+            .map_err(|_| DownloadError::path_violation())?;
+        let meta = file
+            .metadata()
+            .map_err(|_| DownloadError::path_violation())?;
         if !meta.is_file() {
             return Err(DownloadError::path_violation());
         }
         if meta.len() > max_bytes {
             return Err(DownloadError::too_large(meta.len(), max_bytes));
         }
-        let path = std::fs::canonicalize(&rec.path).map_err(|_| DownloadError::path_violation())?;
-        if !path.starts_with(&self.root) {
-            return Err(DownloadError::path_violation());
-        }
-        Ok(OpenedArtifact { record: rec, path })
+        Ok(OpenedArtifact {
+            record: rec,
+            file: Arc::new(Mutex::new(file)),
+            max_bytes,
+        })
     }
 
     pub fn open(&self, id: &str) -> Result<OpenedArtifact, DownloadError> {
@@ -521,14 +575,16 @@ impl ArtifactStore {
 
     /// Eviction: drop the oldest `Ready`/`Failed` entries when at capacity.
     /// Artifacts still being written are never evicted from under a job.
-    fn evict_if_needed(&self) {
-        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+    fn evict_if_needed(g: &mut BTreeMap<String, ArtifactRecord>, producing_job: Option<&str>) {
         if g.len() < MAX_ARTIFACTS {
             return;
         }
         let mut victims: Vec<(u64, String)> = g
             .values()
-            .filter(|r| r.state != ArtifactState::Writing)
+            .filter(|r| {
+                r.state != ArtifactState::Writing
+                    && (producing_job.is_none() || r.job.as_deref() != producing_job)
+            })
             .map(|r| (r.created_ts, r.id.clone()))
             .collect();
         victims.sort();

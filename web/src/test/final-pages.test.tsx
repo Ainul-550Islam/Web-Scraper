@@ -88,9 +88,25 @@ describe("JsonInspector redaction", () => {
     expect(text).toContain("***"); // masked keys
     expect(text).toContain("visible"); // non-credential fields pass through
     expect(text).not.toContain("user:s3cret@"); // userinfo form also gone in any shape
-    // the copy affordance exists (its text is produced from the SAME masked
-    // tree — asserted below via the button existing with the redacted label)
     expect(container.textContent).toContain("Copy redacted JSON");
+  });
+
+  it("bounds depth-limit stubs in a very wide JSON tree", () => {
+    const value: Record<string, unknown> = {};
+    let branch = value;
+    for (let depth = 0; depth < 63; depth += 1) {
+      const next: Record<string, unknown> = {};
+      branch[`level-${depth}`] = next;
+      branch = next;
+    }
+    for (let index = 0; index < 10_000; index += 1) branch[`field-${index}`] = index;
+
+    const { container } = render(
+      <JsonInspector value={value} maxNodes={80} openDepth={64} redact={false} />,
+    );
+    const renderedNodes = container.querySelectorAll(".ji-row, .ji-toggle");
+    expect(renderedNodes.length).toBeLessThanOrEqual(81); // one final omission stub may exceed the counted budget
+    expect(container.textContent).toContain("node(s) beyond the 80-node render budget");
   });
 });
 

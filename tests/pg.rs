@@ -79,8 +79,11 @@ async fn postgres_sink_roundtrip_and_idempotency() {
         eprintln!("SKIP postgres e2e — set HARVEST_TEST_PG=1 and provide a reachable cluster");
         return;
     }
+    // This disposable loopback cluster has no test CA; remote DSNs are still
+    // required to use verified TLS by `pgsink::connection_config`.
     let dsn = std::env::var("HARVEST_PG_DSN").unwrap_or_else(|_| {
-        "host=127.0.0.1 port=5432 user=harvest password=harvest dbname=harvest".into()
+        "host=127.0.0.1 port=5432 user=harvest password=harvest dbname=harvest sslmode=disable"
+            .into()
     });
 
     let base = spawn_pages();

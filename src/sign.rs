@@ -18,11 +18,12 @@
 //! Key file: one line of hex, at least 32 bytes of key material (longer is
 //! fine; HMAC pre-hashes anything over the SHA-256 block size, so oversized
 //! keys remain safe, but we cap at 256 bytes to keep files honest).
-//! `Key::generate` produces 32 fresh bytes from /dev/urandom with mode 0600
+//! `Key::generate` produces 32 fresh bytes from the OS RNG (Unix mode 0600)
 //! and refuses to overwrite an existing key.
 
 use std::fs;
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -64,17 +65,32 @@ fn from_hex(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Key {
     secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Key")
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Key {
     /// Load a key file. Only the first line is considered; surrounding
     /// whitespace is stripped. Hex may be upper- or lowercase.
     pub fn load(path: &Path) -> Result<Key> {
-        let txt =
-            fs::read_to_string(path).with_context(|| format!("read key {}", path.display()))?;
+        let mut txt = String::new();
+        open_regular(path)
+            .with_context(|| format!("read key {}", path.display()))?
+            .take(4097)
+            .read_to_string(&mut txt)
+            .with_context(|| format!("read key {}", path.display()))?;
+        if txt.len() > 4096 {
+            bail!("signing key file exceeds its 4096-byte read budget");
+        }
         let line = txt.lines().next().unwrap_or_default().trim();
         if line.is_empty() {
             bail!(
@@ -124,15 +140,15 @@ impl Key {
             fs::create_dir_all(p).with_context(|| format!("create dir {}", p.display()))?;
         }
         let mut raw = [0u8; 32];
-        fs::File::open("/dev/urandom")
-            .context("open /dev/urandom")?
-            .read_exact(&mut raw)
-            .context("read /dev/urandom")?;
+        getrandom::fill(&mut raw).map_err(|_| {
+            anyhow!("operating-system randomness is unavailable; no signing key was created")
+        })?;
         let body = format!("{}\n", to_hex(&raw));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut f = options
             .open(path)
             .with_context(|| format!("create key {}", path.display()))?;
         std::io::Write::write_all(&mut f, body.as_bytes())
@@ -164,23 +180,76 @@ impl Key {
         })
     }
 
+    /// Stream a pinned regular file with finite work/memory. Metadata is
+    /// checked before and after the stream; EOF is never manufactured by a cap.
+    fn mac_file(&self, path: &Path) -> Result<HmacSha256> {
+        const CAP: u64 = 256 * 1024 * 1024;
+        let mut file = open_regular(path)?;
+        let before = file.metadata()?;
+        if before.len() > CAP {
+            bail!("attested file exceeds the 256 MiB read cap");
+        }
+        let mut mac = self.mac()?;
+        let mut total = 0u64;
+        let mut buf = [0u8; 65536];
+        loop {
+            crate::work_cancel::check()?;
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            if total > before.len() || total > CAP {
+                bail!("attested file grew while being read");
+            }
+            mac.update(&buf[..n]);
+        }
+        let after = file.metadata()?;
+        if total != before.len()
+            || after.len() != before.len()
+            || before.modified().ok() != after.modified().ok()
+        {
+            bail!("attested file changed while being read");
+        }
+        Ok(mac)
+    }
+
     /// Sign `file` by writing `<file>.sig` over its exact bytes. Returns the
     /// signature path.
     pub fn sign_file(&self, file: &Path) -> Result<PathBuf> {
-        let data = fs::read(file).with_context(|| format!("read {}", file.display()))?;
-        let sig = self.sign_bytes(&data)?;
+        let signature = self.mac_file(file)?.finalize().into_bytes();
         let p = sig_path(file);
-        fs::write(&p, format!("{sig}\n")).with_context(|| format!("write {}", p.display()))?;
+        crate::export_io::write(&p, format!("{}\n", to_hex(&signature)).as_bytes())
+            .with_context(|| format!("write {}", p.display()))?;
         Ok(p)
     }
 
     /// Verify `file` against the digest stored in `sig_file`.
     pub fn verify_file(&self, file: &Path, sig_file: &Path) -> Result<()> {
-        let data = fs::read(file).with_context(|| format!("read {}", file.display()))?;
-        let sig =
-            fs::read_to_string(sig_file).with_context(|| format!("read {}", sig_file.display()))?;
-        self.verify_bytes(&data, &sig)
+        let mut signature = String::new();
+        open_regular(sig_file)?
+            .take(1025)
+            .read_to_string(&mut signature)?;
+        if signature.len() > 1024 {
+            bail!("signature exceeds its 1024-byte read budget");
+        }
+        let expected = from_hex(signature.trim())?;
+        self.mac_file(file)?
+            .verify_slice(&expected)
+            .map_err(|_| anyhow!("HMAC verification FAILED: artifact changed or key is different"))
     }
+}
+
+fn open_regular(path: &Path) -> Result<fs::File> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("file path needs a name"))?;
+    crate::fsutil::open_within(parent, &parent.join(name), false)
+        .context("file must be regular and non-symlink")
 }
 
 /// `out/audit.json` -> `out/audit.json.sig`.

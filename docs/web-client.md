@@ -1,8 +1,9 @@
 # Web console (`web/`)
 
 A first-class React + TypeScript operations console for the harvest admin
-API. It is deliberately a **pure read-mostly client**: every surface maps to
-routes the engine actually serves. There is no invented backend.
+API. It is a **read-mostly operations client**: observational screens map to
+real routes, while Control Jobs submits only the engine's bounded crawl, export,
+and AI commands and cancellation requests. There is no invented backend.
 
 ```
 web/
@@ -44,7 +45,7 @@ npm run dev                 # http://localhost:5173
 | `HARVEST_API`   | dev (vite proxy) | Admin API origin the `/api` prefix proxies to. Default `http://127.0.0.1:9678`. |
 | `VITE_API_BASE` | build/dev (vite) | Request base. Default: `/api` in dev (proxied), `""` (same-origin) in production. |
 | `VITE_MOCK`     | dev only         | `"1"` activates deterministic mock fixtures (hard-gated to `import.meta.env.DEV`; a visible banner never lets it pass for live data). |
-| `VITE_ALLOWED_HOST` | dev          | Extra host accepted by the dev server (sandbox/preview proxies). Defaults to allowing all hosts while in the dev server only. |
+| `VITE_ALLOWED_HOST` | dev/preview | Comma-separated extra host allowlist for Vite's dev and preview servers. Defaults to `.e2b.app`; normal local hosts remain usable. |
 
 Production build:
 
@@ -116,7 +117,7 @@ preview` covers the same-origin contract for LAN use (bind `--host`).
 | Export Center | none (local files + generated command) | dataset read in-tab (20 000 record cap), bounded preview with redaction, seven format cards pinned to `harvest::export::ExportFormat`, real local JSONL prepare + digest + download, in-browser manifest re-hash; the composed `harvest export …` command is shown because **generation runs on the engine host** |
 | Crawl Studio | `GET /config` | composes `CrawlCfg` + `TargetCfg` documents with the planner's ceilings (depth 20 / 1 000 000 pages / 10 000 links), read-only engine limits (concurrency, timeouts, retries, robots) from the live config; a config read failure surfaces as an error, never invented numbers |
 | AI Assist | none (local files) | provider document + stage output loaded in-tab; `disabled by default`, external-consent blocking, `AI SUGGESTION` vs `VALIDATED` labelling, confidence bands, local review actions |
-| Control Jobs | `GET /config`, `GET /control/jobs`, `POST /control/{crawl,export,ai}`, `POST /control/jobs/:id/cancel` | the authenticated control plane's console: one bounded command at a time, every submission idempotency-keyed, states/counters/caps straight from the server, cancel disabled against terminal jobs (the server answers 409) |
+| Control Jobs | `GET /config`, `GET /control/jobs`, `POST /control/{crawl,export,ai}`, `POST /control/jobs/:id/cancel` | the control plane's console (bearer-gated when configured, loopback-only otherwise): one bounded command at a time, submissions carry idempotency keys, states/counters/caps come from the server, and cancel is disabled for terminal jobs (the server answers 409) |
 | Control Job | `GET /control/jobs/:id`, `GET /artifacts/:id`, `GET /artifacts/:id/verify` | one job: counters, limits applied, artifacts with verify/download, server timeline, audit reference; polls 2 s while the job can move, 10 min once terminal |
 | Artifacts | `GET /control/jobs`, `GET /control/artifacts/:id` | artifact browser derived from the retained job list (there is no artifact-index endpoint, and none is invented); role/state filters, verify + download by registry id, never by path |
 | API Explorer | none (static) | renders `lib/apiRoutes/API_ROUTES.ts` — the hand-maintained manifest of every `src/admin.rs` arm (34 routes: 28 GET + 6 POST) with auth column, real query params, owning doc file, and per-row copy-cURL; GET/POST segmented filter; pinned in both directions by `tests/route_contract.rs` + `src/test/contract/api-explorer.test.ts`, so this page cannot rot into fiction |
@@ -237,9 +238,11 @@ the keyboard. Single source of truth: `src/hooks/useShortcuts.ts`.
 ## Transport hardening (`src/lib/api.ts`)
 
 Every request carries a timeout (15 s default, 4 s probes). Idempotent GETs
-retry exactly once on network/timeout/503; `apiPost` is never retried (the
-admin API has no idempotency keys). Identical concurrent GETs share one
-flight and a 2 s TTL cache. A 429 makes each poller wait an extra interval
+retry exactly once on network/timeout/503; `apiPost` is never automatically
+retried after an ambiguous outcome. Control-plane crawl/export/AI submissions
+carry an `Idempotency-Key` so an intentional retry can replay the original job;
+operator notes and alert acknowledgements do not use that key. Identical
+concurrent GETs share one flight and a 2 s TTL cache. A 429 makes each poller wait an extra interval
 before the next tick. All failures normalize to `ApiError` with
 `kind|status|code|requestId` so 400/401/404/405/413/429/500/503/timeout/
 abort render consistently. `probeHealth()` powers the connect panel without
@@ -262,29 +265,32 @@ exposes the refresh cadence as a control (3/6/15/30 s).
 
 ## Build, preview, smoke
 
-`npm run build` emits per-route lazy chunks (23 page chunks ≈ 3–18 kB each;
-measured 2026-09-22: entry 50.2 kB raw / 16.9 kB gzip, vendor 140.7 / 45.1,
-stylesheet 37.2 / 8.1 — react + react-dom only). `vite preview` proxies `/api` exactly like dev, so
-`npm run build && npm run smoke` runs a real-artifact browser-level smoke
-over the served dist and a live backend (`e2e/smoke.mjs`, 12 checks: shell,
-asset graph, chunk count (≥23 lazy page chunks, one per route), SPA fallback,
+`npm run build` emits 26 lazy route chunks (one per console route). On the
+reviewed tree (2026-10-05), the entry script measured 56.49 kB raw / 19.15 kB
+gzip, vendor 140.80 / 45.27, and stylesheet 37.19 / 8.11; page chunks ranged
+from 0.16 to 25.29 kB raw. These are descriptive measurements, not size gates.
+`vite preview` proxies `/api` exactly like dev, so `npm run build && npm run
+smoke` runs a real-artifact smoke over the served dist and a live backend
+(`e2e/smoke.mjs`, 12 checks: shell, asset graph, 26 lazy route chunks, SPA fallback,
 health, runs ledger, credential absence, 404 shape, bundle freshness). It
 needs no secrets and no external services beyond `harvest serve`. The
 buyer-flow E2E (`e2e/buyer.mjs`, `npm run e2e:buyer`, 18 checks) goes
 further: it spawns the mock site, the engine, and the preview itself, asserts
 sink-file provenance, proxy-routed API honesty (config name, redaction, 405
 text), then runs the real CLI export → manifest → verify and a graceful
-SIGINT drain. Both scripts are pure Node 20 stdlib — no Playwright, no grid.
+SIGINT drain. Both scripts use Node's standard library and support Node
+Node 22.12.x or 24.x — no Playwright, no browser grid.
 
 ## First run: welcome panel and tour (never a tutorial wall)
 
 - **WelcomePanel** (Overview, until dismissed): backend address, health
   verdict, live capability counts (targets/proxies/robots/audit/attestation —
   all from `GET /config`), and the exact demo command behind a CopyButton.
-  There is deliberately **no "run it for you" button**: the admin API has no
-  run-trigger route (405 says so), so the panel copies a command instead of
-  faking a mutation.
-- **ProductTour** (opt-in, 15 steps, one per real route): a passive corner
+  This panel deliberately does not submit a job: it displays and copies the
+  demo command. Bounded engine-side crawl, export, and AI jobs are available
+  separately under Control Jobs; the panel does not imply that execution is
+  unavailable or fake a mutation.
+- **ProductTour** (opt-in, 14-step itinerary across selected real routes): a passive corner
   card — non-modal, never blocks the page, Back/Next navigate for real,
   Escape/Skip/Finish persist dismissal under `harvest.console.tour`. Step
   titles and descriptions *are* the `ROUTES.ts` metadata, so the tour cannot

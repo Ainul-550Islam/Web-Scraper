@@ -234,11 +234,25 @@ fn sibling_tmp(out: &Path) -> PathBuf {
     out.with_file_name(format!(".{name}.tmp"))
 }
 
+fn open_nofollow(path: &Path) -> std::io::Result<File> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "member needs a filename")
+    })?;
+    crate::fsutil::open_within(parent, &parent.join(name), false)
+}
+
 /// Write a stored-mode ZIP at `out` from `members`, in order. Duplicates and
 /// unsafe names are refused before any byte is written.
 pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipReport> {
     if members.is_empty() {
         bail!("refusing to write an empty archive");
+    }
+    if members.len() > u16::MAX as usize {
+        bail!("ZIP32 archives support at most {} members", u16::MAX);
     }
     let mut names: Vec<String> = Vec::with_capacity(members.len());
     for (name, _) in members {
@@ -252,7 +266,8 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let tmp = sibling_tmp(out);
-    let mut w = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let mut w =
+        crate::export_io::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     let mut central: Vec<u8> = Vec::new();
     let mut entries: Vec<ZipEntry> = Vec::with_capacity(members.len());
     let mut offset: u64 = 0;
@@ -261,24 +276,24 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
 
     for (idx, (_name, member_src)) in members.iter().enumerate() {
         let member = &names[idx];
-        let opened: Option<File> = match member_src {
-            Member::Bytes(_) => None,
-            Member::File(p) => {
-                Some(File::open(p).with_context(|| format!("open {}", p.display()))?)
+        let (opened, size): (Option<File>, u64) = match member_src {
+            Member::Bytes(bytes) => (None, bytes.len() as u64),
+            Member::File(path) => {
+                let file = open_nofollow(path).with_context(|| {
+                    format!(
+                        "open regular member without following links: {}",
+                        path.display()
+                    )
+                })?;
+                let metadata = file.metadata()?;
+                if !metadata.is_file() {
+                    bail!("archive member {member} is not a regular file");
+                }
+                (Some(file), metadata.len())
             }
         };
-        let size: u64 = match member_src {
-            Member::Bytes(b) => b.len() as u64,
-            Member::File(p) => std::fs::metadata(p)
-                .with_context(|| format!("stat {}", p.display()))?
-                .len(),
-        };
         if size > ZIP32_MAX {
-            bail!(
-                "member {member} is {} bytes; ZIP32 archives cap at {}",
-                size,
-                ZIP32_MAX
-            );
+            bail!("member {member} is {size} bytes; ZIP32 archives cap at {ZIP32_MAX}");
         }
         let mut reader: Option<BufReader<File>> = opened.map(Buffered::with_capacity_helper);
         let name_bytes = member.as_bytes();
@@ -299,6 +314,13 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
         local.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
         local.extend_from_slice(&0u16.to_le_bytes()); // extra len
         local.extend_from_slice(name_bytes);
+        let member_end = offset
+            .checked_add(local.len() as u64)
+            .and_then(|end| end.checked_add(size))
+            .ok_or_else(|| anyhow::anyhow!("ZIP32 archive size overflow"))?;
+        if member_end > ZIP32_MAX {
+            bail!("archive exceeds the ZIP32 4 GiB offset limit");
+        }
         w.write_all(&local)?;
 
         let mut crc = Crc32::new();
@@ -324,11 +346,7 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
             (None, Member::File(_)) => unreachable!("file members always open a reader"),
         }
         if written != size {
-            bail!(
-                "member {member} changed while being archived ({} -> {})",
-                size,
-                written
-            );
+            bail!("member {member} changed while being archived ({size} -> {written})");
         }
         let crc = crc.finish();
         // The local header reserves the CRC and both size fields before the
@@ -366,6 +384,13 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
     }
 
     let cd_offset = offset;
+    let final_size = cd_offset
+        .checked_add(central.len() as u64)
+        .and_then(|size| size.checked_add(22))
+        .ok_or_else(|| anyhow::anyhow!("ZIP32 archive size overflow"))?;
+    if cd_offset > ZIP32_MAX || central.len() as u64 > ZIP32_MAX || final_size > ZIP32_MAX {
+        bail!("archive exceeds the ZIP32 4 GiB directory/offset limit");
+    }
     w.write_all(&central)?;
     total += central.len() as u64;
 
@@ -390,7 +415,7 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
     // Digest the archive *file* (not just its members): that is the value a
     // client can re-hash after a download. Streamed, so memory stays flat.
     let mut file_hash = Sha256::new();
-    let mut reader = BufReader::with_capacity(COPY_CHUNK, File::open(out)?);
+    let mut reader = BufReader::with_capacity(COPY_CHUNK, open_nofollow(out)?);
     let mut buf = [0u8; COPY_CHUNK];
     loop {
         let n = reader.read(&mut buf)?;
@@ -413,7 +438,7 @@ pub fn write_zip(out: &Path, members: &[(String, Member<'_>)]) -> Result<ZipRepo
 /// write position. Seeks within the header only — the member's bytes stay on
 /// disk, never in memory.
 fn patch_local_header(
-    w: &mut File,
+    w: &mut crate::export_io::BudgetedFile,
     member_start: u64,
     crc_slot: usize,
     size_slot: usize,

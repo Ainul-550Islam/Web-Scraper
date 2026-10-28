@@ -17,28 +17,43 @@ export default function Activity() {
   const conn = useConnection();
   const [filter, setFilter] = useState<Filter>("requests");
   const [live, setLive] = useState(true);
-  const since = useRef(0);
+  const [since, setSince] = useState(0);
+  const cursorRef = useRef(0);
   const [items, setItems] = useState<EventsResponse["events"]>([]);
-  const failures = useRef<FailuresResponse | null>(null);
-  const [, force] = useState(0);
+  const [failures, setFailures] = useState<FailuresResponse | null>(null);
 
   useEffect(() => {
     let stop = false;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       if (document.visibilityState === "hidden" || !live) return;
       try {
         const kindQ = filter === "requests" ? "&kind=request_finished" : "";
-        const d = await apiGet<EventsResponse>(`/events?limit=64&since_seq=${since.current}${kindQ}`);
+        const d = await apiGet<EventsResponse>(`/events?limit=64&since_seq=${cursorRef.current}${kindQ}`);
         if (stop) return;
         if (d.events.length) {
-          since.current = Math.max(since.current, ...d.events.map((e) => e.seq));
-          setItems((cur) => [...d.events, ...cur].slice(0, 140));
+          const nextCursor = Math.max(cursorRef.current, d.last_seq, ...d.events.map((e) => e.seq));
+          cursorRef.current = nextCursor;
+          setSince((current) => Math.max(current, nextCursor));
+          setItems((current) => {
+            const seen = new Set(current.map((event) => event.seq));
+            const additions: EventsResponse["events"] = [];
+            for (const event of d.events) {
+              if (seen.has(event.seq)) continue;
+              seen.add(event.seq);
+              additions.push(event);
+            }
+            return additions.length ? [...additions, ...current].slice(0, 140) : current;
+          });
         }
         const f = await apiGet<FailuresResponse>("/failures?limit=25");
-        failures.current = f;
-        force((n) => n + 1);
+        if (!stop) setFailures(f);
       } catch {
         /* offline is surfaced by the shell status bar; feed just pauses */
+      } finally {
+        inFlight = false;
       }
     };
     void tick();
@@ -59,7 +74,7 @@ export default function Activity() {
     <Page>
       <PageHeader
         title="Request Activity"
-        sub={`ring ${conn.health ? "live" : "offline"} · cursor #${since.current} · newest first · delta polling`}
+        sub={`ring ${conn.health ? "live" : "offline"} · cursor #${since} · newest first · delta polling`}
         actions={
           <>
             <button className="btn" onClick={() => setLive((v) => !v)} aria-pressed={!live}>
@@ -117,9 +132,9 @@ export default function Activity() {
 
         <div style={{ display: "grid", gap: "var(--s-4)", alignContent: "start" }}>
           <Card title="Recent failures">
-            {failures.current?.items.length ? (
+            {failures?.items.length ? (
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
-                {failures.current.items.map((f, i) => (
+                {failures.items.map((f, i) => (
                   <li key={i} style={{ fontSize: 12.5 }}>
                     <code className="t-code">{String(f.url ?? "—")}</code>
                     <div className="t-caption">{String(f.error ?? f.status ?? "")}</div>

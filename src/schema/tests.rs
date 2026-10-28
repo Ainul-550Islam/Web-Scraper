@@ -171,6 +171,40 @@ fn transform_failures_are_schema_failures_under_strict() {
 }
 
 #[test]
+fn quarantine_redacts_url_credentials_before_persisting() {
+    let dir =
+        std::env::temp_dir().join(format!("harvest-quarantine-redact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let q = dir.join("quarantine.jsonl");
+    let fields = fields(&[("secret", Value::String("not-a-url-secret".into()))]);
+
+    crate::schema::Schema::compile(&target(SchemaCfg {
+        enforce: "strict".into(),
+        fields: BTreeMap::new(),
+        quarantine_path: Some(q.clone()),
+    }))
+    .unwrap()
+    .unwrap()
+    .quarantine(
+        "https://alice:long-password@example.test/private/path?token=secret-token",
+        2,
+        &fields,
+        &[("value".into(), "invalid".into())],
+    )
+    .unwrap();
+
+    let body = std::fs::read_to_string(&q).unwrap();
+    assert!(!body.contains("alice"));
+    assert!(!body.contains("long-password"));
+    assert!(!body.contains("private/path"));
+    assert!(!body.contains("secret-token"));
+    let value: Value = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(value["url"], "https://example.test");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn date_field_normalizes_rfc3339_offsets() {
     let cfg = SchemaCfg {
         enforce: "coerce".into(),

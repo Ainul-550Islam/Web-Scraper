@@ -16,8 +16,8 @@ cargo build --release --all-features        # or grab a prebuilt binary
 
 The default `config.example.json` binds admin to `127.0.0.1:9678` with no
 token — correct for a laptop, **not** for a host with a routable interface.
-Dashboard: `http://127.0.0.1:9678/`. Stop with Ctrl-C — in-flight pages
-finish, sinks flush, history/audit land, then exit 0.
+Dashboard: `http://127.0.0.1:9678/`. Stop with Ctrl-C — active requests
+cancel, owned sink workers drain/join, history/audit land, then exit 0.
 
 Long crawls (production): keep `ckpt_path` set; a crashed or restarted box
 continues with `harvest run --config … --resume` (refused if the policy
@@ -28,17 +28,23 @@ changed in between — edit config and start fresh in that case).
 ```bash
 docker build -t harvest-engine:latest .
 docker run -d --name harvest \
-  -v "$PWD/myconfig":/etc/harvest:ro \
+  -v "$PWD/myconfig.json":/etc/harvest/config.json:ro \
   -v harvest-data:/var/lib/harvest \
   -p 127.0.0.1:9678:9678 \
   --env-file harvest.env \
-  harvest-engine:latest
+  harvest-engine:latest serve --config /etc/harvest/config.json
 ```
+
+For a published port, set `metrics_addr` to `0.0.0.0:9678` inside the
+container and set `"admin_token": "${HARVEST_ADMIN_TOKEN}"`; keep the host
+side of `-p` on `127.0.0.1` unless a TLS/authenticated front end is in place.
+Put every file-sink, audit, checkpoint, revalidation, and history path under
+`/var/lib/harvest`, the only writable data volume in the read-only deployment.
 
 What the image does for you (`Dockerfile`):
 
-- multi-stage rustls build (`--features "sqlite postgres"` baked in; add
-  `redis` by rebuilding with it) — **no secrets, no config in the image**;
+- multi-stage rustls build (`--features "sqlite postgres redis"` baked in; change
+  `--build-arg HARVEST_FEATURES="…"` if needed) — **no secrets, no config in the image**;
 - runtime: `debian:bookworm-slim` + CA certs only; **non-root uid 10001**;
 - `/var/lib/harvest` pre-created and chowned to the service user (the only
   writable path — point file-sink `path`s and history/audit/ckpt under it);
@@ -51,34 +57,52 @@ Required for a routable bind: `HARVEST_ADMIN_TOKEN` in `harvest.env` plus
 `"admin_token": "${HARVEST_ADMIN_TOKEN}"` in the config; without them the
 container exits 1 at startup with the remedy in the message — intentional.
 
-Note on stop semantics: the engine drains gracefully on **SIGINT**; docker
-stop sends SIGTERM (immediate kill) by default, so for drain-on-stop use
-`docker run --stop-signal SIGINT …` (compose: `stop_signal: SIGINT`,
-already set in `ops/docker-compose.yml`).
+The engine drains on **SIGINT and SIGTERM**. Compose uses SIGTERM and a
+45-second stop grace. Active requests and pacing/storage waits cancel;
+HTTP/Postgres sink workers use an aggregate 15-second drain deadline and
+are joined before finalization. Filesystem/kernel stalls are not something
+an application-level timeout can reliably interrupt.
 
 ## 3 · Docker Compose (engine + Prometheus + Grafana)
 
 ```bash
+cp -n ops/harvest/config.example.json ops/harvest/config.json
+# Replace the loopback demo target with sources you are authorized to crawl.
 export GRAFANA_ADMIN_PASSWORD="$(head -c18 /dev/urandom | base64)"
 export HARVEST_ADMIN_TOKEN="$(head -c24 /dev/urandom | base64)"
-docker compose -f ops/docker-compose.yml up -d
+docker compose -f ops/docker-compose.yml up --build -d
 ```
 
-Topology: `harvest :9678 (127.0.0.1)` ⇐ scrape ⇒ `prometheus :9090
-(127.0.0.1)` ⇒ datasource ⇒ `grafana :3000 (127.0.0.1)` with provisioned
-dashboard `ops/grafana/dashboards/harvest.json`.
+The Compose starter config is deliberate: the engine listens on
+`0.0.0.0:9678` **inside the Compose network** so the console, Prometheus, and
+host-published port can reach it; the bearer token is mandatory, while the
+published host port is still bound only to `127.0.0.1`. Its writable output,
+audit, checkpoint, revalidation, and history files live under
+`/var/lib/harvest`. Replace the example target and user-agent contact before
+starting a real crawl.
+
+Topology: console `:8088`, engine `:9678`, Prometheus `:9090`, and Grafana
+`:3000` are all published on host loopback. Inside Compose, console and
+Prometheus reach the `harvest:9678` service; Grafana uses Prometheus as its
+datasource. Dashboard: `ops/grafana/dashboards/harvest.json`.
 
 Hardened defaults already in the file — keep them for anything off-laptop:
 all host ports bound to `127.0.0.1`; harvest container `read_only: true` +
 `tmpfs /tmp` + `cap_drop: [ALL]` + `no-new-privileges`; config mounted `:ro`;
-Grafana sign-up off; the compose Grafana password is a **dev placeholder**
-overridden by `GRAFANA_ADMIN_PASSWORD`. Prometheus sends the bearer token
-from `$HARVEST_ADMIN_TOKEN` so scrape keeps working once you enable auth
-(that env is passed to both containers — same single secret).
+Grafana sign-up off; a unique `GRAFANA_ADMIN_PASSWORD` is mandatory and is
+not hard-coded. `HARVEST_ADMIN_TOKEN` is required by both the engine and
+Prometheus. Prometheus does **not** expand arbitrary YAML credential
+strings. Its entrypoint writes the token to a mode-0600 runtime file, unsets
+the environment variable, and YAML uses `authorization.credentials_file`.
+The console uses an unprivileged nginx image (uid/gid 101) and a writable
+`/tmp` for pid/temporary files; production Host **including its port** is
+preserved with `$http_host`, so authenticated browser mutations remain
+same-origin after reverse proxying.
 
-Real exposure answer: put a TLS reverse proxy (nginx/traefik/Caddy) in
-front of Grafana/Prometheus rather than re-binding ports; Prometheus itself
-has no auth story.
+The engine drains on both SIGINT and SIGTERM; Compose sends SIGTERM with a
+45-second grace period. For public exposure, put a TLS reverse proxy
+(nginx/traefik/Caddy) in front of the services rather than re-binding host
+ports; Prometheus itself has no auth story.
 
 ## Databases
 
@@ -92,8 +116,11 @@ CREATE DATABASE harvest OWNER harvest;
 ```
 
 Config: `"output": {"kind":"postgres","dsn":"host=db port=5432 user=harvest
-password=${PG_PASSWORD} dbname=harvest sslmode=require"}` (dev: drop
-`sslmode`). Backups = plain `pg_dump harvest`; harvest never expires rows,
+password=… dbname=harvest sslmode=require"}`. Inject the **whole DSN** as
+`"dsn":"${HARVEST_PG_DSN}"`; embedded `${VAR}` fragments are deliberately
+not expanded. Remote connections require `sslmode=require` and platform CA
+verification (no hostname/certificate bypass); loopback may use
+`sslmode=disable` for development. Backups = plain `pg_dump harvest`; harvest never expires rows,
 retention is your DBA's call.
 
 **Redis** (distributed mode only) — no schema; harvest uses keyed lists/sets
@@ -101,7 +128,7 @@ under one prefix (`{prefix}:jobs`, `{prefix}:inflight`, `{prefix}:dlq`,
 `{prefix}:seen_urls`, `{prefix}:seen_fp`, and a shared robots cache at
 `{prefix}:robots:{scheme}://{authority}`), so a shared instance is safe if
 you keep a unique prefix per crawl. Use `rediss://` for anything not on
-localhost (enforced when AUTH + remote host). No persistence needed for
+localhost (enforced for every remote host, with or without AUTH). No persistence needed for
 correctness (queue loss = re-push). A job a killed worker had checked out
 stays in `{prefix}:inflight` until swept back — `harvest queue` prints
 jobs/inflight/dlq/dedup counts so strays are visible; the sweep itself is the
@@ -187,3 +214,18 @@ signature files are part of a delivery, copy them together.
 archive read-only with the deliveries), plus your Postgres dumps.
 Checkpoint files are transient (deleted on completion) — never a backup
 target.
+
+
+## Service and Kubernetes recipes
+
+`deploy/systemd/harvest.service.example` runs the **engine**, not a static
+file server. Install nginx/Caddy separately for `web/dist` and proxy `/api`
+from the same origin. Put whole-value environment secrets in a root-owned
+`/etc/harvest/harvest.env` (mode 0600); `HARVEST_ADMIN_TOKEN_FILE` is not an
+implemented engine option. The console Kubernetes deployment now declares
+uid/gid 101, drops capabilities and provides a bounded writable tmpfs.
+It assumes an existing `harvest-engine` service; it is not a full Kubernetes
+engine/Redis/Postgres installation.
+
+For resource limits, stricter redirect/robots behavior, source formats,
+private snapshots and recovery caveats, see [review hardening](review-hardening.md).

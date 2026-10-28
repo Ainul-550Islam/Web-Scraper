@@ -15,7 +15,7 @@ Top-down pipeline order (what happens to one page):
 ```
 config (src/config.rs) ─ validate at startup, policy sha
   → scheduler (src/sched.rs) — every_secs loop, runs cap, history
-  → engine (src/engine.rs) — run orchestration, budgets wiring, SIGINT drain
+  → engine (src/engine.rs) — run orchestration, budgets wiring, SIGINT/SIGTERM drain
   → runner (src/runner.rs) — crawl frontier, dlq replay, robots gate call
   → fetcher (src/fetcher.rs) — reqwest client, reval (src/reval.rs),
     retry/backoff (src/retry.rs), breaker (src/breaker.rs),
@@ -28,7 +28,7 @@ config (src/config.rs) ─ validate at startup, policy sha
   → ckpt (src/ckpt.rs), audit (src/audit.rs), events (src/events.rs),
     metrics (src/metrics.rs), alerts (src/alerts.rs), ops (src/ops.rs),
     accounting (src/accounting.rs)
-admin plane: src/admin.rs (router: 23 GET + 2 POST) + src/admin/ submodules,
+admin plane: src/admin.rs (router: 28 GET + 6 POST) + src/admin/ submodules,
   helpers in src/api.rs; signing in src/sign.rs; export in src/export.rs.
 CLI: src/main.rs (clap: run, serve, history, validate, schema, push,
   worker, queue, status, health, jobs, runs, workers, proxies, metrics,
@@ -91,7 +91,7 @@ tools/check_links.py  relative-markdown-link checker (`make links`)
 Makefile            fmt/lint/test/build/links/smoke/buyer-e2e/all
 demo/server.py      deterministic mock site for examples/config.basic.json
 examples/*.json     validated by tests/examples.rs (5 configs)
-docs/               api/ (24) · pages/ (16) · adr/ · this map · buyer docs
+docs/               api/ (26) · pages/ (27, including the index) · adr/ · this map · buyer docs
 docker/             compose stack for console+engine demo (static-validated)
 ```
 

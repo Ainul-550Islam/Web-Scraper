@@ -27,8 +27,8 @@ echo "== policy self-description =="
 curl -fsS "${auth[@]}" "$BASE/policy"
 
 echo "== security headers present on every response =="
-# (GET + dump headers; every documented route is a read — the server
-#  keys on the path, there are no write endpoints to stumble into)
+# (GET + dump headers; the server routes by method and path. Mutations
+#  are limited to explicit POST endpoints documented in docs/api/.)
 curl -fsS -D - -o /dev/null "${auth[@]}" "$BASE/stats" \
   | grep -iE 'x-content-type-options|cache-control'
 
@@ -38,5 +38,6 @@ curl -s -o /dev/null -w '%{http_code}\n' "$BASE/nope" || true
 # Negative tests worth running before a security review:
 #   wrong token        -> 401, body carries no echo of path/token
 #   token set, /health -> 200 (probes must never authenticate)
-#   any method         -> same read-only routes (server keys on path; there
-#                         are no write semantics to reach)
+#   POST /stats        -> 405 (GET-only route)
+#   unsupported method -> 405; the six documented POST routes are explicit
+#                         operator actions or bounded control-plane operations

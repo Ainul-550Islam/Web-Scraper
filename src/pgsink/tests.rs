@@ -69,7 +69,7 @@ fn fail_all_acks_every_queued_flush_with_the_reason() {
     let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
     let (a1, r1) = std::sync::mpsc::channel();
     let (a2, r2) = std::sync::mpsc::channel();
-    tx.send(Cmd::Push(rec("x"))).unwrap();
+    tx.send(Cmd::Push(rec("x"), 1)).unwrap();
     tx.send(Cmd::Flush(a1)).unwrap();
     tx.send(Cmd::Flush(a2)).unwrap();
     fail_all(&rx, "boom");

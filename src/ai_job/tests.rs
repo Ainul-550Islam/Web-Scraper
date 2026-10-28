@@ -144,10 +144,74 @@ fn fields_from_run_output_rejects_broken_lines() {
 }
 
 #[test]
-fn clip_bounds_a_single_huge_value() {
+fn clip_bounds_a_single_huge_value_by_utf8_bytes() {
     let s = "x".repeat(5_000);
     assert_eq!(clip(&s, 2_048).chars().count(), 2_048);
     assert_eq!(clip("abc", 10), "abc");
+    let multibyte = "বাংলা".repeat(1_000);
+    let clipped = clip(&multibyte, 2_048);
+    assert!(clipped.len() <= 2_048);
+    assert!(std::str::from_utf8(clipped.as_bytes()).is_ok());
+}
+
+#[test]
+fn legacy_run_output_reader_rejects_an_oversized_line_before_json_parse() {
+    let d = tmp("line-cap");
+    let p = d.join("out.jsonl");
+    let line = format!(
+        "{{\"fields\":{{\"x\":\"{}\"}}}}\n",
+        "x".repeat(AI_SOURCE_LINE_CAP)
+    );
+    std::fs::write(&p, line).unwrap();
+    let error = fields_from_run_output(&p, 1, 1).unwrap_err();
+    assert!(error.contains("1 MiB"), "{error}");
+}
+
+#[test]
+fn run_output_resolution_enforces_the_serialized_input_budget_while_building() {
+    let d = tmp("source-budget");
+    let p = d.join("out.jsonl");
+    std::fs::write(
+        &p,
+        serde_json::json!({"fields":{"value":"x".repeat(3_000)}}).to_string() + "\n",
+    )
+    .unwrap();
+    let cfg = cfg_with_output(&p);
+    let mut s = spec(LOCAL_PROVIDER_ID, "classify", &[("unused", "x")]);
+    s.source = AiSource::RunOutput {
+        record_limit: 1,
+        field_limit: 1,
+    };
+    s.max_input_bytes = 1_024;
+    let error = resolve_fields(&s, &cfg).unwrap_err();
+    assert!(error.starts_with("budget-exceeded:"), "{error}");
+    let result = run(&s, &cfg);
+    assert_eq!(result.state, "budget-exceeded");
+    assert!(result.reason.unwrap().contains("input cap"));
+}
+
+#[test]
+fn run_output_resolution_has_a_total_field_count_ceiling() {
+    let d = tmp("field-cap");
+    let p = d.join("out.jsonl");
+    let mut body = String::new();
+    for row in 0..21 {
+        let fields = (0..crate::control::MAX_AI_FIELDS)
+            .map(|field| (format!("f{field}"), serde_json::Value::String("v".into())))
+            .collect::<serde_json::Map<_, _>>();
+        body.push_str(&serde_json::json!({"row":row,"fields":fields}).to_string());
+        body.push('\n');
+    }
+    std::fs::write(&p, body).unwrap();
+    let cfg = cfg_with_output(&p);
+    let mut s = spec(LOCAL_PROVIDER_ID, "classify", &[("unused", "x")]);
+    s.source = AiSource::RunOutput {
+        record_limit: 21,
+        field_limit: crate::control::MAX_AI_FIELDS,
+    };
+    s.max_input_bytes = crate::control::MAX_AI_INPUT_CEILING;
+    let error = resolve_fields(&s, &cfg).unwrap_err();
+    assert!(error.contains("10000"), "{error}");
 }
 
 // ---------------------------------------------------------------------- runs

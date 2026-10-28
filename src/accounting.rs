@@ -90,6 +90,13 @@ impl Accounting {
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         self.requests.fetch_add(1, Ordering::Relaxed);
     }
+    /// A running item was returned to the pending queue (usually shutdown or
+    /// cancellation), so it no longer occupies a worker but is not complete.
+    pub fn note_deferred(&self) {
+        self.active_jobs
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v - 1).max(0)))
+            .ok();
+    }
     pub fn note_finish_ok(&self, waited: Duration) {
         self.active_jobs
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v - 1).max(0)))

@@ -1,2 +1,2 @@
-# harvest/config.json lives here for docker compose deployment.
-# Start from ../../config.example.json and edit.
+# Local Compose config is copied from config.example.json and edited here.
+# config.json is git-ignored because it may hold real credentials.

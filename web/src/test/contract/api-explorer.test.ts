@@ -10,9 +10,7 @@ type Fs = {
   readdirSync: (p: string) => string[];
   statSync: (p: string) => { isDirectory(): boolean };
 };
-// @ts-expect-error provided by vitest's node environment
 const fs = (await import("node:fs")) as unknown as Fs;
-// @ts-expect-error provided by vitest's node environment
 const { join } = (await import("node:path")) as unknown as { join: (...p: string[]) => string };
 import { API_ROUTES } from "../../lib/apiRoutes";
 
@@ -57,7 +55,7 @@ describe("API Explorer manifest contract", () => {
     const files = walk(srcRoot);
     const used = new Set<string>();
     for (const f of files) {
-      if (f.includes("lib/apiRoutes")) continue;
+      if (f.includes("lib/apiRoutes") || f.includes(join(srcRoot, "test")) || /\.test\.tsx?$/.test(f)) continue;
       const src = fs.readFileSync(f, "utf8");
       const re = /api(Get|Post|Raw)<[^>]*>\(\s*[`"']([^`"'?]+)/g;
       for (const m of src.matchAll(re)) used.add(m[2]!);

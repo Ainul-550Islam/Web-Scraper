@@ -157,8 +157,8 @@ describe("AI Assist — suggestions", () => {
 
   it("reports a failed stage as failure, never as an empty success", async () => {
     const { container } = await loadBoth(PROVIDER_ON, { state: "failed", suggestions: [] });
+    await waitFor(() => expect(container.textContent).toContain("Stage state: failed"));
     expect(container.textContent).toContain("No suggestions in this document");
-    expect(container.textContent).toContain("Stage state: failed");
   });
 
   it("redacts credential-shaped field values on the card", async () => {

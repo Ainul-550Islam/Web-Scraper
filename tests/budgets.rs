@@ -129,3 +129,43 @@ fn pool_cap_semantics_are_exact() {
     drop(h);
     assert!(pool.try_hold(0).is_some(), "released capacity re-admits");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audit_global_page_budget_is_hard_under_fanout() {
+    let origin = mock(40);
+    let fx = TempFixture::new("auditglobalpages", &origin.base());
+    let mut cfg = fx.config();
+    cfg.max_pages = 3;
+    cfg.targets[0].max_pages = 100;
+    cfg.concurrency = 4;
+    cfg.default_policy.requests_per_sec = 1000.0;
+    cfg.default_policy.burst = 100;
+    cfg.default_policy.min_interval_ms = 0;
+    let result = harvest::engine::run_with(Arc::new(cfg), harvest::engine::RunCtx::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        result.pages_fetched <= 3,
+        "queued fanout must not overshoot the global budget: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audit_target_page_budget_is_hard_under_fanout() {
+    let origin = mock(40);
+    let fx = TempFixture::new("audittargetpages", &origin.base());
+    let mut cfg = fx.config();
+    cfg.max_pages = 100;
+    cfg.targets[0].max_pages = 3;
+    cfg.concurrency = 4;
+    cfg.default_policy.requests_per_sec = 1000.0;
+    cfg.default_policy.burst = 100;
+    cfg.default_policy.min_interval_ms = 0;
+    let result = harvest::engine::run_with(Arc::new(cfg), harvest::engine::RunCtx::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        result.pages_fetched <= 3,
+        "queued fanout must not overshoot the target budget: {result:?}"
+    );
+}

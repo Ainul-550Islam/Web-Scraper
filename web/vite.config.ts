@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // The harvest admin API does not emit CORS headers (deliberate — it is a
@@ -7,9 +7,9 @@ import react from "@vitejs/plugin-react";
 // from the same origin as the admin address (see docs/web-client.md).
 const BACKEND = process.env.HARVEST_API ?? "http://127.0.0.1:9678";
 
-const HOSTS = (process.env.VITE_ALLOWED_HOST ?? "").length
-  ? [process.env.VITE_ALLOWED_HOST as string]
-  : true;
+const HOSTS = process.env.VITE_ALLOWED_HOST
+  ? process.env.VITE_ALLOWED_HOST.split(",").map((host) => host.trim()).filter(Boolean)
+  : [".e2b.app"];
 
 export default defineConfig({
   plugins: [react()],
@@ -21,19 +21,20 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: BACKEND,
-        changeOrigin: true,
+        changeOrigin: false,
         rewrite: (p) => p.replace(/^\/api/, ""),
       },
     },
   },
   server: {
+    host: "0.0.0.0",
     // sandbox/preview hosts (e.g. *.e2b.app) must be accepted by the dev
     // server's host check; kept scoped to the proxy-style preview domain.
     allowedHosts: HOSTS,
     proxy: {
       "/api": {
         target: BACKEND,
-        changeOrigin: true,
+        changeOrigin: false,
         rewrite: (p) => p.replace(/^\/api/, ""),
       },
     },
@@ -63,5 +64,6 @@ export default defineConfig({
     setupFiles: ["src/test/setup.ts"],
     css: false,
     restoreMocks: true,
+    maxWorkers: 2,
   },
 });

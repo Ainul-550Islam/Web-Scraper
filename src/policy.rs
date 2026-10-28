@@ -21,6 +21,7 @@ struct Bucket {
     blocked_until: Option<Instant>,
     consecutive_blocks: u32,
     abandoned: bool,
+    long_restriction: bool,
 }
 
 impl Bucket {
@@ -30,6 +31,7 @@ impl Bucket {
                 return u - now;
             }
             self.blocked_until = None;
+            self.long_restriction = false;
         }
         let dt = now.duration_since(self.last_refill).as_secs_f64();
         self.tokens = (self.tokens + dt * self.refill_per_sec).min(self.capacity);
@@ -38,7 +40,7 @@ impl Bucket {
         let mut wait = Duration::ZERO;
         if self.tokens < 1.0 {
             let need = 1.0 - self.tokens;
-            wait = Duration::from_secs_f64(need / self.refill_per_sec.max(0.001));
+            wait = Duration::from_secs_f64(need / self.refill_per_sec.max(1.0 / 3600.0));
         }
         if let Some(last) = self.last_call {
             let since = now - last;
@@ -71,7 +73,7 @@ impl Bucket {
     }
 
     fn note_block(&mut self, backoff_secs: u64, breaker_count: u32) -> Duration {
-        self.consecutive_blocks += 1;
+        self.consecutive_blocks = self.consecutive_blocks.saturating_add(1);
         let exp = self.consecutive_blocks.saturating_sub(1).min(6);
         let secs = backoff_secs.saturating_mul(1u64 << exp).min(3600);
         self.blocked_until = Some(Instant::now() + Duration::from_secs(secs));
@@ -89,6 +91,24 @@ pub struct Politeness {
 }
 
 impl Politeness {
+    /// Reset run-local refusal counts, but NEVER reset tokens, spacing or
+    /// a live site Retry-After floor just because another run began.
+    pub(crate) fn begin_epoch(&self) {
+        for bucket in self
+            .hosts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            let mut b = bucket.lock().unwrap_or_else(|p| p.into_inner());
+            b.consecutive_blocks = 0;
+            b.abandoned =
+                b.long_restriction && b.blocked_until.is_none_or(|at| at > Instant::now());
+            if !b.abandoned {
+                b.long_restriction = false;
+            }
+        }
+    }
     pub fn new(cfg: &Config) -> Self {
         Self {
             hosts: Mutex::new(HashMap::new()),
@@ -112,17 +132,18 @@ impl Politeness {
                     blocked_until: None,
                     consecutive_blocks: 0,
                     abandoned: false,
+                    long_restriction: false,
                 }))
             })
             .clone()
     }
 
     /// Tighten a host's min-interval to honor robots.txt `Crawl-delay:`.
-    /// Only ever raises the pace the *site asked for*; capped at 60 s so a
+    /// Only ever raises the pace the *site asked for*; waits above one hour refuse the host so a
     /// hostile/garbage directive can't stall a run (beyond that the site is
     /// saying "don't crawl"; the operator can mirror it in domain_policies).
     pub fn note_crawl_delay(&self, host: &str, cfg: &Config, d: Duration) {
-        const CAP: Duration = Duration::from_secs(60);
+        const CAP: Duration = Duration::from_secs(3600);
         if d.is_zero() {
             return;
         }
@@ -130,11 +151,17 @@ impl Politeness {
             tracing::warn!(
                 host,
                 secs = d.as_secs(),
-                "Crawl-delay above 60s; clamping (tune domain_policies to slow further)"
+                "Crawl-delay above 1h; refusing this host rather than shortening its restriction"
             );
         }
-        let d = d.min(CAP);
         let b = self.bucket(host, cfg);
+        if d > CAP {
+            let mut guard = b.lock().unwrap_or_else(|p| p.into_inner());
+            guard.abandoned = true;
+            guard.long_restriction = true;
+            guard.blocked_until = Instant::now().checked_add(d);
+            return;
+        }
         let mut g = b.lock().unwrap_or_else(|p| p.into_inner());
         if g.min_interval < d {
             tracing::info!(
@@ -152,16 +179,38 @@ impl Politeness {
         Bucket::acquire(&b, host, metrics).await;
     }
 
+    /// Wait without allowing a long Crawl-delay/Retry-After to prevent shutdown.
+    pub(crate) async fn wait_stoppable(
+        &self,
+        host: &str,
+        cfg: &Config,
+        metrics: &Metrics,
+        stop: Option<&std::sync::atomic::AtomicBool>,
+        halt: &std::sync::atomic::AtomicBool,
+    ) -> bool {
+        let mut wait = Box::pin(self.wait(host, cfg, metrics));
+        loop {
+            if halt.load(std::sync::atomic::Ordering::Relaxed)
+                || stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return false;
+            }
+            tokio::select! { _ = &mut wait => return true, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+        }
+    }
+
     /// Engine calls this after an HTTP 401/403/429/451 from `host`.
     /// `Retry-After`, when present, is honored as a floor.
     pub fn note_block(&self, host: &str, cfg: &Config, retry_after: Option<Duration>) -> Duration {
         let b = self.bucket(host, cfg);
         let mut guard = b.lock().unwrap_or_else(|p| p.into_inner());
         let computed = guard.note_block(self.backoff_secs, self.breaker_count);
-        let applied = retry_after.map_or(computed, |ra| {
-            ra.max(computed).min(Duration::from_secs(3600))
-        });
-        guard.blocked_until = Some(Instant::now() + applied);
+        let applied = retry_after.map_or(computed, |ra| ra.max(computed));
+        if applied > Duration::from_secs(3600) {
+            guard.abandoned = true;
+            guard.long_restriction = true;
+        }
+        guard.blocked_until = Instant::now().checked_add(applied);
         let abandoned = guard.abandoned;
         drop(guard);
         if abandoned {
@@ -230,7 +279,7 @@ mod crawl_delay_tests {
         );
 
         // A smaller (or looser-configured) note never *relaxes* pacing,
-        // and absurd delays clamp to 60s rather than stalling forever.
+        // and absurd delays refuse the host rather than shortening its floor.
         pol.note_crawl_delay("h", &cfg, Duration::from_millis(10));
         let b = pol.bucket("h", &cfg);
         assert_eq!(
@@ -241,7 +290,8 @@ mod crawl_delay_tests {
         let b2 = pol.bucket("big", &cfg);
         assert_eq!(
             b2.lock().unwrap_or_else(|p| p.into_inner()).min_interval,
-            Duration::from_secs(60)
+            Duration::ZERO
         );
+        assert!(pol.is_abandoned("big", &cfg));
     }
 }

@@ -176,13 +176,12 @@ export default function CrawlStudio() {
   ]);
   const [cfg, setCfg] = useState<ConfigDocument | null>(null);
   const [cfgError, setCfgError] = useState<Error | null>(null);
-  const [cfgLoading, setCfgLoading] = useState(true);
+  const cfgLoading = cfg === null && cfgError === null;
 
   // The engine's politeness/network limits are read-only here: they are the
   // authority for what a crawl may actually do.
   useEffect(() => {
     let alive = true;
-    setCfgLoading(true);
     apiGet<ConfigDocument>("/config")
       .then((d) => {
         if (!alive) return;
@@ -195,7 +194,7 @@ export default function CrawlStudio() {
         setCfgError(e instanceof Error ? e : new Error(String(e)));
       })
       .finally(() => {
-        if (alive) setCfgLoading(false);
+
       });
     return () => {
       alive = false;

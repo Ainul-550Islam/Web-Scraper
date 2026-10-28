@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::api::epoch_secs;
 use crate::config::Config;
@@ -245,6 +246,9 @@ pub struct ExecutionRegistry {
     inner: Mutex<RegistryInner>,
     artifacts: Arc<ArtifactStore>,
     idempotency: IdempotencyIndex,
+    submission: Mutex<()>,
+    draining: AtomicBool,
+    active_tasks: std::sync::atomic::AtomicUsize,
     audit: Arc<AuditLedger>,
     ops: Arc<OpsLog>,
     runtime: RuntimeSlot,
@@ -270,6 +274,9 @@ impl ExecutionRegistry {
             inner: Mutex::new(RegistryInner::default()),
             artifacts,
             idempotency: IdempotencyIndex::new(),
+            submission: Mutex::new(()),
+            draining: AtomicBool::new(false),
+            active_tasks: std::sync::atomic::AtomicUsize::new(0),
             audit,
             ops,
             runtime,
@@ -304,6 +311,7 @@ impl ExecutionRegistry {
     pub fn submit(self: &Arc<Self>, cmd: &ControlCommand) -> Result<SubmitOutcome, ControlError> {
         let cfg = self.cfg();
         cmd.validate(cfg.as_deref())?;
+        let submission = self.submission.lock().unwrap_or_else(|p| p.into_inner());
 
         if let Some(key) = &cmd.idempotency_key {
             match self
@@ -347,6 +355,7 @@ impl ExecutionRegistry {
                 id.as_str(),
             );
         }
+        drop(submission);
         // The audit line carries the decisions an auditor would want to see
         // later: for an AI job that is which provider was named and whether
         // external processing was consented to. Never the fields themselves.
@@ -383,13 +392,16 @@ impl ExecutionRegistry {
     /// exhausted control plane refuses rather than queueing forever.
     pub fn enqueue(&self, cmd: &ControlCommand) -> Result<ControlJobId, ControlError> {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if self.draining.load(Ordering::SeqCst) {
+            return Err(ControlError::unavailable("the control plane is draining"));
+        }
         let in_flight = g.jobs.values().filter(|j| j.state.in_flight()).count();
         if in_flight >= MAX_QUEUE_DEPTH {
             return Err(ControlError::unavailable(format!(
                 "the control plane is at capacity ({MAX_QUEUE_DEPTH} jobs in flight)"
             )));
         }
-        let id = ControlJobId::next();
+        let id = ControlJobId::try_next()?;
         let now = epoch_secs();
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let deadline = now.saturating_add(cmd.limits.timeout_secs);
@@ -413,13 +425,20 @@ impl ExecutionRegistry {
             seq,
         };
         g.jobs.insert(id.as_str().to_string(), job);
-        Self::evict_locked(&mut g);
+        let evicted = Self::evict_locked(&mut g);
+        drop(g);
+        for old_id in evicted {
+            self.cleanup_retired_job(&old_id);
+        }
         Ok(id)
     }
 
     /// Start queued jobs while a slot is free. Called after every submission
     /// and every terminal transition, so nothing needs a background poller.
     fn pump(self: &Arc<Self>) {
+        if self.draining.load(Ordering::SeqCst) {
+            return;
+        }
         let mut started_any = true;
         while started_any {
             started_any = false;
@@ -441,32 +460,45 @@ impl ExecutionRegistry {
                 }
             };
             if let Some(id) = next {
-                self.start(&id);
-                started_any = true;
+                started_any = self.start(&id);
             }
         }
     }
 
     /// Move one job `Queued -> Running` and spawn it.
-    fn start(self: &Arc<Self>, id: &str) {
+    fn start(self: &Arc<Self>, id: &str) -> bool {
         let cancel = {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if self.draining.load(Ordering::SeqCst) {
+                return false;
+            }
+            // pump() selection and start() may interleave on different HTTP
+            // tasks. Re-check the capacity under the transition lock.
+            if g.jobs
+                .values()
+                .filter(|j| j.state == ExecState::Running)
+                .count()
+                >= MAX_CONCURRENT_JOBS
+            {
+                return false;
+            }
             let Some(job) = g.jobs.get_mut(id) else {
-                return;
+                return false;
             };
             if !ExecState::can_transition(job.state, ExecState::Running) {
-                return;
+                return false;
             }
             job.state = ExecState::Running;
             job.updated_ts = epoch_secs();
             push_event(job, "started", json!({}));
+            self.active_tasks.fetch_add(1, Ordering::SeqCst);
             job.cancel.clone()
         };
         let op = {
             let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.jobs.get(id).map(|j| j.cmd.operation())
         };
-        let Some(op) = op else { return };
+        let Some(op) = op else { return false };
         self.audit.note(
             "admin-api",
             &format!("control.{}.start", op.as_str()),
@@ -476,13 +508,35 @@ impl ExecutionRegistry {
         );
         let me = self.clone();
         let job_id = id.to_string();
-        let handle = tokio::spawn(async move {
+        // Count real tasks, not just reported job states: a timed-out task
+        // still owns its storage gate until its workers and sinks drain.
+        tokio::spawn(async move {
+            struct Finished {
+                reg: Arc<ExecutionRegistry>,
+                id: String,
+                cancel: Arc<AtomicBool>,
+            }
+            impl Drop for Finished {
+                fn drop(&mut self) {
+                    self.reg.finish(
+                        &self.id,
+                        Err(JobFailure::new(
+                            "execution task stopped before reporting an outcome",
+                        )),
+                        self.cancel.clone(),
+                    );
+                    self.reg.active_tasks.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _finished = Finished {
+                reg: me.clone(),
+                id: job_id.clone(),
+                cancel: cancel.clone(),
+            };
             me.run_job(job_id.clone(), cancel).await;
             me.pump();
         });
-        // Detached on purpose: the job owns its own terminal transition, and
-        // the deadline reaper covers a task that dies without reporting.
-        drop(handle);
+        true
     }
 
     fn corr_of(&self, id: &str) -> String {
@@ -506,20 +560,17 @@ impl ExecutionRegistry {
             }
         };
 
-        let work = self.execute(&id, spec, limits, cancel.clone());
-        let outcome =
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), work).await {
-                Ok(o) => o,
-                Err(_) => {
-                    // Deadline hit: set the stop flag so the engine drains, and
-                    // record the timeout as the reason.
-                    cancel.store(true, Ordering::Relaxed);
-                    Err(JobFailure::new(format!(
-                        "job exceeded its {}s deadline and was stopped",
-                        timeout_secs
-                    )))
-                }
-            };
+        let mut work = Box::pin(self.execute(&id, spec, limits, cancel.clone()));
+        let outcome = tokio::select! {
+            outcome = &mut work => outcome,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                cancel.store(true, Ordering::Relaxed);
+                // Never drop an engine future with detached workers, or a
+                // spawn_blocking export that is still writing. Await its drain.
+                let _ = work.await;
+                Err(JobFailure::new(format!("job exceeded its {timeout_secs}s deadline and was drained")))
+            }
+        };
 
         self.finish(&id, outcome, cancel.clone());
     }
@@ -540,7 +591,7 @@ impl ExecutionRegistry {
         match spec {
             CommandSpec::Crawl(req) => self.run_crawl(id, &req, &limits, cancel).await,
             CommandSpec::Export(req) => self.run_export(id, &req, &limits, cancel).await,
-            CommandSpec::AiAssist(req) => self.run_ai(id, &req, &limits).await,
+            CommandSpec::AiAssist(req) => self.run_ai(id, &req, &limits, cancel).await,
             // Verify and artifact-inspect are answered synchronously by the
             // router; they never become jobs.
             CommandSpec::Verify(_) | CommandSpec::ArtifactInspect(_) => {
@@ -556,6 +607,14 @@ impl ExecutionRegistry {
         limits: &CommandLimits,
         cancel: Arc<AtomicBool>,
     ) -> Result<Value, JobFailure> {
+        let _output_guard = self
+            .runtime
+            .output_guard(Some(cancel.as_ref()))
+            .await
+            .map_err(|e| JobFailure::new(e.to_string()))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(JobFailure::new("cancelled while waiting for storage"));
+        }
         let base = self
             .cfg()
             .ok_or_else(|| JobFailure::new("no configuration is attached to this server"))?;
@@ -585,7 +644,7 @@ impl ExecutionRegistry {
         let pool = Arc::new(crate::proxy::ProxyPool::new(&cfg.proxies));
         // Its own runtime slot: a control-plane crawl must not overwrite the
         // slot the serve loop publishes through `/runtime`.
-        let runtime = RuntimeSlot::default();
+        let runtime = self.runtime.isolated();
         let ctx = crate::engine::RunCtx {
             metrics,
             pool,
@@ -614,27 +673,106 @@ impl ExecutionRegistry {
         // root — that is what "download the records" means here.
         if let Ok(files) = crate::export_job::source_files(&cfg) {
             for f in files {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(JobFailure::new("cancelled while snapshotting run output"));
+                }
                 let name = f
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "records.jsonl".to_string());
-                if let Ok(art) = self.artifacts.register(
-                    f.clone(),
+                let snapshot_dir = self.root.join("run-snapshots").join(id);
+                crate::fsutil::prepare_private_directory(&snapshot_dir)
+                    .map_err(|e| JobFailure::new(format!("create run snapshot: {e}")))?;
+                let snapshot = snapshot_dir.join(&name);
+                let source = f.clone();
+                let dest = snapshot.clone();
+                let cancel_snapshot = cancel.clone();
+                let copied = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                    let _cancel = crate::work_cancel::begin(cancel_snapshot);
+                    use std::io::{Read, Write};
+                    let source_parent = source
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let source_name = source
+                        .file_name()
+                        .ok_or_else(|| anyhow::anyhow!("run output needs a filename"))?;
+                    let mut input = crate::fsutil::open_within(
+                        source_parent,
+                        &source_parent.join(source_name),
+                        false,
+                    )?;
+                    let source_len = input.metadata()?.len();
+                    let cap = crate::control::MAX_DOWNLOAD_BYTES;
+                    if source_len > cap {
+                        anyhow::bail!("run output exceeds the artifact download cap");
+                    }
+                    let mut output = crate::export_io::create(&dest)?;
+                    let mut hasher = Sha256::new();
+                    let mut copied = 0u64;
+                    let mut buffer = [0u8; 65_536];
+                    loop {
+                        crate::work_cancel::check()?;
+                        let read = input.read(&mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+                        copied = copied.saturating_add(read as u64);
+                        if copied > cap || copied > source_len {
+                            anyhow::bail!("run output grew beyond its pinned artifact size");
+                        }
+                        output.write_all(&buffer[..read])?;
+                        hasher.update(&buffer[..read]);
+                    }
+                    if copied != source_len {
+                        anyhow::bail!("run output changed or shrank while being snapshotted");
+                    }
+                    output.sync_all()?;
+                    Ok(format!("{:x}", hasher.finalize()))
+                })
+                .await
+                .map_err(|e| {
+                    let _ = crate::fsutil::remove_file_nofollow(&snapshot);
+                    JobFailure::new(format!("snapshot task failed: {e}"))
+                })?;
+                let sha = match copied {
+                    Ok(sha) => sha,
+                    Err(error) => {
+                        let _ = crate::fsutil::remove_file_nofollow(&snapshot);
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(JobFailure::new("cancelled while snapshotting run output"));
+                        }
+                        return Err(JobFailure::new(format!("run snapshot failed: {error:#}")));
+                    }
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = crate::fsutil::remove_file_nofollow(&snapshot);
+                    return Err(JobFailure::new("cancelled while registering run output"));
+                }
+                let art = match self.artifacts.register(
+                    snapshot.clone(),
                     name,
                     ArtifactRole::RunOutput,
                     Some(id.to_string()),
                     VerificationState::NotRequested,
                 ) {
-                    let sha = std::fs::read(&f)
-                        .map(|b| crate::control::sha256_hex(&b))
-                        .unwrap_or_default();
-                    let _ = self.artifacts.finalize(art.as_str(), sha);
-                    let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(job) = g.jobs.get_mut(id) {
-                        job.artifacts.push(art.as_str().to_string());
+                    Ok(art) => art,
+                    Err(error) => {
+                        let _ = crate::fsutil::remove_file_nofollow(&snapshot);
+                        return Err(JobFailure::new(error.message));
                     }
+                };
+                self.artifacts
+                    .finalize(art.as_str(), sha)
+                    .map_err(|e| JobFailure::new(e.message))?;
+                let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(job) = g.jobs.get_mut(id) {
+                    job.artifacts.push(art.as_str().to_string());
                 }
             }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(JobFailure::new("cancelled after the crawl finished"));
         }
 
         Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
@@ -655,15 +793,27 @@ impl ExecutionRegistry {
         let cfg = self
             .cfg()
             .ok_or_else(|| JobFailure::new("no configuration is attached to this server"))?;
+        let _output_guard = self
+            .runtime
+            .output_guard(Some(cancel.as_ref()))
+            .await
+            .map_err(|e| JobFailure::new(e.to_string()))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(JobFailure::new("cancelled while waiting for storage"));
+        }
         let out_dir = self.root.join("deliveries").join(id);
         let spec2 = spec.clone();
         let out = out_dir.clone();
         let cfg2 = cfg.clone();
         // `export::run` is synchronous file I/O; it goes to the blocking pool
         // so a big delivery cannot stall the admin server's async tasks.
-        let res = tokio::task::spawn_blocking(move || crate::export_job::run(&spec2, &cfg2, &out))
-            .await
-            .map_err(|e| JobFailure::new(format!("export task failed: {e}")))?;
+        let cancel2 = cancel.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let _cancel = crate::work_cancel::begin(cancel2);
+            crate::export_job::run(&spec2, &cfg2, &out)
+        })
+        .await
+        .map_err(|e| JobFailure::new(format!("export task failed: {e}")))?;
 
         let (result, produced) = res.map_err(JobFailure::new)?;
         if cancel.load(Ordering::Relaxed) {
@@ -673,6 +823,11 @@ impl ExecutionRegistry {
             return Err(JobFailure::new("cancelled while finishing the delivery"));
         }
 
+        if produced.len() > crate::download::MAX_ARTIFACTS {
+            return Err(JobFailure::new(
+                "delivery has more than 256 artifacts; select fewer formats/targets",
+            ));
+        }
         let mut artifact_views: Vec<Value> = Vec::new();
         for f in produced {
             match self.artifacts.register(
@@ -725,7 +880,16 @@ impl ExecutionRegistry {
         id: &str,
         req: &crate::control::AiRequest,
         limits: &CommandLimits,
+        cancel: Arc<AtomicBool>,
     ) -> Result<Value, JobFailure> {
+        let _output_guard = self
+            .runtime
+            .output_guard(Some(cancel.as_ref()))
+            .await
+            .map_err(|e| JobFailure::new(e.to_string()))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(JobFailure::new("cancelled while waiting for storage"));
+        }
         let spec = crate::ai_job::AiJobSpec::from_request(req, limits)
             .map_err(|e| JobFailure::new(e.message))?;
         let cfg = self
@@ -733,9 +897,13 @@ impl ExecutionRegistry {
             .ok_or_else(|| JobFailure::new("no configuration is attached to this server"))?;
         let cfg2 = cfg.clone();
         let spec2 = spec.clone();
-        let res = tokio::task::spawn_blocking(move || crate::ai_job::run(&spec2, &cfg2))
-            .await
-            .map_err(|e| JobFailure::new(format!("ai task failed: {e}")))?;
+        let cancel2 = cancel.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let _cancel = crate::work_cancel::begin(cancel2);
+            crate::ai_job::run(&spec2, &cfg2)
+        })
+        .await
+        .map_err(|e| JobFailure::new(format!("ai task failed: {e}")))?;
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(job) = g.jobs.get_mut(id) {
@@ -811,7 +979,7 @@ impl ExecutionRegistry {
         };
         if cancelled || target == ExecState::Failed {
             self.artifacts
-                .fail_job_artifacts(id, "the producing job did not complete");
+                .invalidate_job_artifacts(id, "the producing job did not complete");
         }
         self.audit.note(
             "admin-api",
@@ -947,6 +1115,40 @@ impl ExecutionRegistry {
         g.jobs.values().filter(|j| j.state.in_flight()).count()
     }
 
+    /// Stop admissions and wait for the actual execution tasks, including
+    /// workers/sink flushes behind a deadline. Used before the runtime exits.
+    pub(crate) fn drain_on_stop(
+        self: &Arc<Self>,
+        stop: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let me = self.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            me.drain().await;
+        })
+    }
+
+    pub async fn drain(self: &Arc<Self>) {
+        let ids = {
+            let _submission = self.submission.lock().unwrap_or_else(|p| p.into_inner());
+            let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            self.draining.store(true, Ordering::SeqCst);
+            g.jobs
+                .values()
+                .filter(|j| j.state.in_flight())
+                .map(|j| j.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for id in ids {
+            let _ = self.cancel(&id, "shutdown");
+        }
+        while self.active_tasks.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     pub fn running(&self) -> usize {
         self.inner
             .lock()
@@ -1049,9 +1251,10 @@ impl ExecutionRegistry {
     }
 
     /// Evict the oldest terminal jobs past the retention cap.
-    fn evict_locked(g: &mut RegistryInner) {
+    fn evict_locked(g: &mut RegistryInner) -> Vec<String> {
+        let mut evicted = Vec::new();
         if g.jobs.len() <= MAX_JOBS {
-            return;
+            return evicted;
         }
         let mut victims: Vec<(u64, String)> = g
             .jobs
@@ -1065,6 +1268,42 @@ impl ExecutionRegistry {
                 break;
             }
             g.jobs.remove(&id);
+            evicted.push(id);
+        }
+        evicted
+    }
+
+    fn cleanup_retired_job(&self, id: &str) {
+        if ControlJobId::parse(id).is_none() {
+            return;
+        }
+        self.artifacts.forget_job(id);
+        for path in [
+            self.root.join("deliveries").join(id),
+            self.root.join("run-snapshots").join(id),
+            self.root
+                .join("deliveries")
+                .join(format!(".source-stage-{id}")),
+        ] {
+            // Only generated job directories, never configured source/output
+            // files, are eligible. Do not follow aliases while removing them.
+            match std::fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    tracing::warn!("retired job cleanup failed; operator cleanup required");
+                    continue;
+                }
+                Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+                    tracing::warn!("unsafe retired job directory was not removed");
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            if crate::fsutil::reject_symlink_components(&path).is_err()
+                || std::fs::remove_dir_all(&path).is_err()
+            {
+                tracing::warn!("retired job cleanup failed; operator cleanup required");
+            }
         }
     }
 }
@@ -1086,8 +1325,10 @@ fn push_event(job: &mut Job, kind: &str, detail: Value) {
 fn reap_locked(g: &mut RegistryInner) {
     let now = epoch_secs();
     for job in g.jobs.values_mut() {
-        if job.state.in_flight() && now > job.deadline_ts {
-            job.state = ExecState::Failed;
+        if job.state.in_flight() && now > job.deadline_ts && !job.cancel.load(Ordering::Relaxed) {
+            if job.state == ExecState::Queued {
+                job.state = ExecState::Failed;
+            }
             job.updated_ts = now;
             job.error = Some(format!(
                 "job exceeded its deadline ({}s) and was reaped",

@@ -8,11 +8,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function Probe({
   fetcher,
   interval = 1500,
+  query,
 }: {
   fetcher: (s: AbortSignal) => Promise<unknown>;
   interval?: number;
+  query?: string;
 }) {
-  const p = usePolled(fetcher, interval);
+  const p = usePolled(fetcher, interval, query);
   return (
     <div>
       <output data-testid="state">{p.state}</output>
@@ -114,5 +116,44 @@ describe("usePolled (hooks/usePolled)", () => {
     });
     expect(fetcher.mock.calls.length).toBe(count + 1);
     if (desc?.get) Object.defineProperty(document, "visibilityState", desc);
+  });
+});
+
+
+describe("polling review regressions", () => {
+  it("manual pause does not issue an extra request", async () => {
+    const fetcher = vi.fn(async () => ({ ok: true }));
+    const { getByRole, getByTestId } = render(<Probe fetcher={fetcher} />);
+    await waitFor(() => expect(getByTestId("state").textContent).toBe("live"));
+    fireEvent.click(getByRole("button", { name: "pause" }));
+    await waitFor(() => expect(getByTestId("state").textContent).toBe("paused"));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("visibility catch-up cannot override an explicit pause", async () => {
+    const fetcher = vi.fn(async () => ({}));
+    const { getByRole, getByTestId } = render(<Probe fetcher={fetcher} />);
+    await waitFor(() => expect(getByTestId("state").textContent).toBe("live"));
+    fireEvent.click(getByRole("button", { name: "pause" }));
+    await waitFor(() => expect(getByTestId("state").textContent).toBe("paused"));
+    const descriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    try {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(getByTestId("state").textContent).toBe("paused");
+    } finally { if (descriptor) Object.defineProperty(document, "visibilityState", descriptor); }
+  });
+  it("an endpoint/query generation change clears old data immediately", async () => {
+    let newer = false;
+    const fetcher = vi.fn(() => newer ? new Promise<unknown>(() => {}) : Promise.resolve({ old: true }));
+    const view = render(<Probe fetcher={fetcher} query="old-source" />);
+    await waitFor(() => expect(view.getByTestId("data").textContent).toBe('{"old":true}'));
+    newer = true;
+    view.rerender(<Probe fetcher={fetcher} query="new-source" />);
+    await waitFor(() => expect(view.getByTestId("data").textContent).toBe("null"));
+    expect(view.getByTestId("state").textContent).toBe("connecting");
+    view.unmount();
   });
 });

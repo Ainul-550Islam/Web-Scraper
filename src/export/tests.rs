@@ -27,6 +27,62 @@ fn fixture(dir: &Path) -> PathBuf {
     p
 }
 
+#[cfg(unix)]
+#[test]
+fn export_rejects_symlinked_inputs_and_history_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = workdir("no-follow-inputs");
+    let victim = dir.join("private.jsonl");
+    let input = dir.join("input-link.jsonl");
+    std::fs::write(
+        &victim,
+        format!("{}\n", json!({"url":"https://example.test/", "fields":{}})),
+    )
+    .unwrap();
+    symlink(&victim, &input).unwrap();
+    let options = ExportOpts {
+        inputs: vec![input.clone()],
+        out_dir: dir.join("delivery"),
+        split_target: false,
+        history: None,
+        key: None,
+        max_part_bytes: 0,
+        resume: false,
+        formats: Vec::new(),
+        dataset: None,
+        pdf_sample_rows: 12,
+    };
+    assert!(
+        run(&options).is_err(),
+        "a symlink input must not be followed"
+    );
+
+    let history = dir.join("history-link.jsonl");
+    symlink(&victim, &history).unwrap();
+    assert!(policy_for_runs(&history, &BTreeSet::new()).is_err());
+    assert!(history_counters(&history, &[]).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn progress_publish_replaces_hardlink_without_truncating_its_target() {
+    use std::fs::hard_link;
+
+    let dir = workdir("progress-hardlink");
+    let victim = dir.join("victim");
+    std::fs::write(&victim, b"operator-owned bytes").unwrap();
+    hard_link(&victim, dir.join(PROGRESS_FILE)).unwrap();
+
+    let progress = Progress {
+        fingerprint: "test-fingerprint".to_string(),
+        files: Vec::new(),
+    };
+    save_progress(&dir, &progress).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"operator-owned bytes");
+    assert_eq!(load_progress(&dir).unwrap().fingerprint, "test-fingerprint");
+}
+
 #[test]
 fn field_flattening_and_column_union_are_exact() {
     // The CSV contract operators type against: nested objects become
@@ -365,4 +421,95 @@ fn zip_writer_refuses_unsafe_member_names() {
         let err = super::bundle::write_zip_from_files(&dir.join("bad.zip"), &files).unwrap_err();
         assert!(err.to_string().contains("archive member name"), "{}", err);
     }
+}
+
+#[test]
+fn audit_empty_manifest_must_not_verify_successfully() {
+    let dir = std::env::temp_dir().join(format!("harvest-audit-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let m = serde_json::json!({"v":1,"generated_ts":1,"source_files":[],"records":1,"unique_urls":1,"skipped_lines":0,"runs":[],"targets":{},"policy_sha256":null,"split_target":false,"columns":[],"files":[]});
+    std::fs::write(dir.join("manifest.json"), m.to_string()).unwrap();
+    assert!(
+        !verify(&dir, None).unwrap().ok,
+        "no payload cannot be a verified delivery"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn audit_manifest_path_traversal_is_refused() {
+    let base = std::env::temp_dir().join(format!("harvest-audit-traversal-{}", std::process::id()));
+    let dir = base.join("delivery");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = b"private\n";
+    std::fs::write(base.join("private.txt"), body).unwrap();
+    let m = serde_json::json!({"v":1,"generated_ts":1,"source_files":[],"records":1,"unique_urls":1,"skipped_lines":0,"runs":[],"targets":{},"policy_sha256":null,"split_target":false,"columns":[],"files":[{"name":"../private.txt","sha256":digest_hex(Sha256::digest(body)),"bytes":body.len(),"lines":1}]});
+    std::fs::write(dir.join("manifest.json"), m.to_string()).unwrap();
+    assert!(
+        !verify(&dir, None).unwrap().ok,
+        "must not verify an external file"
+    );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn audit_flattening_preserves_literal_paths_empty_objects_and_metadata_names() {
+    let value = json!({"run":"meta-run","fields":{"a.b":1,"a":{"b":2},"empty":{},"run":"payload-run","fields:run":"literal-key"}});
+    let row = split_row(&value);
+    assert_eq!(row.1["a\\.b"], 1);
+    assert_eq!(row.1["a.b"], 2);
+    assert_eq!(row.1["empty"], json!({}));
+    assert_eq!(row.1["fields:run"], "payload-run");
+    assert_eq!(row.1["fields\\:run"], "literal-key");
+    let table = records_json(&[&row], &target_columns(&[&row]));
+    assert_eq!(table[0]["run"], "meta-run");
+    assert_eq!(table[0]["fields:run"], "payload-run");
+}
+
+#[test]
+fn audit_forged_resume_sidecar_cannot_substitute_its_own_payload() {
+    let dir = workdir("audit-forged-resume");
+    let input = fixture(&dir);
+    let mut options = ExportOpts {
+        inputs: vec![input],
+        out_dir: dir.join("delivery"),
+        split_target: false,
+        history: None,
+        key: None,
+        max_part_bytes: 0,
+        resume: false,
+        formats: vec![ExportFormat::Jsonl],
+        dataset: None,
+        pdf_sample_rows: 12,
+    };
+    run(&options).unwrap();
+    let expected = std::fs::read(options.out_dir.join("records.jsonl")).unwrap();
+    let wrong = b"{\"run\":\"forged\",\"fields\":{\"title\":\"wrong\"}}\n";
+    std::fs::write(options.out_dir.join("records.jsonl"), wrong).unwrap();
+    options.resume = true;
+    let entry = file_entry(&options.out_dir, "records.jsonl").unwrap();
+    save_progress(
+        &options.out_dir,
+        &Progress {
+            fingerprint: run_fingerprint(&options).unwrap(),
+            files: vec![entry],
+        },
+    )
+    .unwrap();
+    run(&options).unwrap();
+    assert_eq!(
+        std::fs::read(options.out_dir.join("records.jsonl")).unwrap(),
+        expected
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn audit_checksum_only_folder_cannot_claim_to_deliver_records() {
+    let dir = workdir("audit-checksum-only");
+    std::fs::write(dir.join("checksums.txt"), b"").unwrap();
+    let value = json!({"v":1,"generated_ts":1,"source_files":[],"split_target":false,"records":100,"unique_urls":0,"skipped_lines":0,"runs":[],"targets":{},"columns":[],"files":[{"name":"checksums.txt","sha256":digest_hex(Sha256::digest(b"")),"bytes":0,"lines":0}]});
+    std::fs::write(dir.join("manifest.json"), value.to_string()).unwrap();
+    assert!(!verify(&dir, None).unwrap().ok);
+    std::fs::remove_dir_all(dir).ok();
 }

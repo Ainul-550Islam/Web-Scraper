@@ -12,7 +12,7 @@ describe("ApiExplorer", () => {
     await mountPage(<ApiExplorer />);
     expect(await screen.findByText("API Explorer")).toBeTruthy();
     const rows = () => within(document.querySelector("table")!);
-    for (const p of ["/health", "/runs", "/alerts/ack", "/ops/note"]) {
+    for (const p of ["/health", "/runs", "/alerts/ack", "/ops/note", "/control/crawl", "/control/jobs/:id/cancel"]) {
       expect(rows().getByText(p, { selector: "code" })).toBeTruthy();
     }
     expect(screen.getByText(`${API_ROUTES.length} routes`, { exact: false })).toBeTruthy();
@@ -23,13 +23,23 @@ describe("ApiExplorer", () => {
     }
   });
 
-  it("POST filter leaves only the two real mutations", async () => {
+  it("POST filter shows exactly the six documented mutations", async () => {
     await mountPage(<ApiExplorer />);
     await screen.findByText("API Explorer");
     const rows = () => within(document.querySelector("table")!);
+    const mutations = [
+      "/alerts/ack",
+      "/ops/note",
+      "/control/crawl",
+      "/control/export",
+      "/control/ai",
+      "/control/jobs/:id/cancel",
+    ];
     fireEvent.click(screen.getByRole("button", { name: /POST/ }));
-    expect(rows().getByText("/alerts/ack", { selector: "code" })).toBeTruthy();
-    expect(rows().getByText("/ops/note", { selector: "code" })).toBeTruthy();
+    for (const path of mutations) {
+      expect(rows().getByText(path, { selector: "code" })).toBeTruthy();
+    }
+    expect(rows().getAllByRole("row")).toHaveLength(mutations.length + 1);
     expect(rows().queryAllByText("/health", { selector: "code" })).toHaveLength(0);
   });
 });

@@ -19,9 +19,11 @@
 //! dependency on the scheduler, so it can be executed from a worker task, a
 //! test, or the CLI-equivalent without any of them growing a second path.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{Config, SinkCfg};
 use crate::control::{CommandLimits, ControlError, ExportRequest};
@@ -51,21 +53,8 @@ pub fn source_files(cfg: &Config) -> Result<Vec<PathBuf>, ControlError> {
                     "the configured dataset directory does not exist yet; run a crawl first",
                 ));
             }
-            let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-                .map_err(|_| ControlError::unavailable("cannot read the dataset directory"))?
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-                .collect();
-            files.sort();
-            if files.is_empty() {
-                return Err(ControlError::unavailable(
-                    "the configured dataset directory holds no .jsonl parts yet",
-                ));
-            }
-            if files.len() > MAX_SOURCE_FILES {
-                files.truncate(MAX_SOURCE_FILES);
-            }
+            let files = crate::source_io::dataset_files(dir).map_err(|e| ControlError::unavailable(format!("cannot discover dataset parts: {e}")))?;
+            if files.is_empty() { return Err(ControlError::unavailable("the configured dataset directory holds no .jsonl parts yet")); }
             Ok(files)
         }
         SinkCfg::Http { .. } | SinkCfg::Postgres { .. } | SinkCfg::Null {} => {
@@ -184,43 +173,57 @@ pub fn truncate_inputs(
     work_dir: &Path,
     max_records: u64,
 ) -> Result<Vec<PathBuf>, String> {
-    use std::io::{BufRead, Write};
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut remaining = max_records;
-    for (i, src) in inputs.iter().enumerate() {
-        if remaining == 0 {
+    crate::source_io::stage(&Config::default(), inputs, work_dir, max_records)
+        .map_err(|e| e.to_string())
+}
+
+fn hash_output_file(path: &Path, cap: u64) -> std::io::Result<(String, u64)> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output needs a filename")
+    })?;
+    let mut file = crate::fsutil::open_within(parent, &parent.join(name), false)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "produced output is not a regular file",
+        ));
+    }
+    if metadata.len() > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "produced output exceeds its byte cap",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 65_536];
+    loop {
+        crate::work_cancel::check()?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
             break;
         }
-        let fh = std::fs::File::open(src)
-            .map_err(|e| format!("cannot read the configured output file: {e}"))?;
-        let dst = work_dir.join(format!("source-{i}.jsonl"));
-        let mut w = std::io::BufWriter::new(
-            std::fs::File::create(&dst).map_err(|e| format!("cannot stage source file: {e}"))?,
-        );
-        let mut kept = 0u64;
-        for line in std::io::BufReader::new(fh).lines() {
-            let line = line.map_err(|e| format!("cannot read source line: {e}"))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            if kept >= remaining {
-                break;
-            }
-            writeln!(w, "{line}").map_err(|e| format!("cannot stage source file: {e}"))?;
-            kept += 1;
+        bytes = bytes.saturating_add(read as u64);
+        if bytes > cap || bytes > metadata.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "produced output changed or grew beyond its pinned size",
+            ));
         }
-        w.flush()
-            .map_err(|e| format!("cannot stage source file: {e}"))?;
-        drop(w);
-        remaining -= kept;
-        if kept > 0 {
-            out.push(dst);
-        }
+        hasher.update(&buffer[..read]);
     }
-    if out.is_empty() {
-        return Err("the configured output holds no records to export".to_string());
+    if bytes != metadata.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "produced output changed or shrank while being hashed",
+        ));
     }
-    Ok(out)
+    Ok((format!("{:x}", hasher.finalize()), bytes))
 }
 
 /// Run one export with the existing exporter and register nothing. Returns
@@ -233,9 +236,23 @@ pub fn run(
 ) -> Result<(ExportResult, Vec<ProducedFile>), String> {
     let inputs = source_files(cfg).map_err(|e| e.message)?;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create the delivery dir: {e}"))?;
-    let stage = out_dir.join(".stage");
+    let label = out_dir
+        .file_name()
+        .ok_or("delivery directory needs a name")?
+        .to_string_lossy();
+    let stage = out_dir.with_file_name(format!(".source-stage-{label}"));
+    crate::fsutil::reject_symlink_components(&stage)
+        .map_err(|e| format!("unsafe source stage: {e}"))?;
     std::fs::create_dir_all(&stage).map_err(|e| format!("cannot stage inputs: {e}"))?;
-    let staged = truncate_inputs(&inputs, &stage, spec.max_records)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let _source_stage = crate::source_io::StageGuard(stage.clone());
+    let staged = crate::source_io::stage(cfg, &inputs, &stage, spec.max_records)
+        .map_err(|e| format!("cannot prepare sources: {e}"))?;
 
     let opts = ExportOpts {
         inputs: staged,
@@ -256,29 +273,41 @@ pub fn run(
         dataset: spec.dataset.clone(),
         pdf_sample_rows: 12,
     };
-    let report = crate::export::run(&opts).map_err(|e| format!("export failed: {e}"))?;
-    let _ = std::fs::remove_dir_all(&stage);
+    let report = crate::export::run_bounded(&opts, spec.max_export_bytes).map_err(|e| {
+        let cause = format!("{e:#}")
+            .replace(&out_dir.to_string_lossy().to_string(), "[delivery]")
+            .replace(&stage.to_string_lossy().to_string(), "[source-stage]");
+        if cause.contains("byte budget exceeded") {
+            format!(
+                "delivery is over the {} byte cap (write rejected before publication): {cause}",
+                spec.max_export_bytes
+            )
+        } else {
+            format!("export failed: {cause}")
+        }
+    })?;
+    // The private source-stage guard cleans on success, error and cancellation.
 
     // Everything the delivery directory now holds is a candidate artifact;
     // the manifest tells us which ones it vouches for.
-    let mut names: Vec<String> = std::fs::read_dir(out_dir)
-        .map_err(|e| format!("cannot list the delivery dir: {e}"))?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
+    let directory =
+        std::fs::read_dir(out_dir).map_err(|e| format!("cannot list the delivery dir: {e}"))?;
+    let mut names = Vec::new();
+    for entry in directory {
+        let entry = entry.map_err(|e| format!("cannot read a delivery directory entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with('.') {
+            names.push(name);
+        }
+    }
     names.sort();
 
     let mut produced: Vec<ProducedFile> = Vec::new();
     let mut total = 0u64;
     for name in names {
         let path = out_dir.join(&name);
-        let md = std::fs::metadata(&path).map_err(|e| format!("cannot stat {name}: {e}"))?;
-        if !md.is_file() {
-            continue;
-        }
-        let body = std::fs::read(&path).map_err(|e| format!("cannot read {name}: {e}"))?;
-        let sha = crate::control::sha256_hex(&body);
+        let (sha, bytes) = hash_output_file(&path, spec.max_export_bytes.min(256 * 1024 * 1024))
+            .map_err(|e| format!("cannot safely hash produced file {name}: {e}"))?;
         let role = if name == "manifest.json" || name == "manifest.json.sig" {
             ArtifactRole::Manifest
         } else if name == "checksums.txt" {
@@ -288,12 +317,18 @@ pub fn run(
         } else {
             ArtifactRole::Payload
         };
-        total = total.saturating_add(md.len());
+        total = total.saturating_add(bytes);
+        if total > spec.max_export_bytes {
+            return Err(format!(
+                "the delivery is over the {} byte cap for this job",
+                spec.max_export_bytes
+            ));
+        }
         produced.push(ProducedFile {
             path,
             name,
             role,
-            bytes: md.len(),
+            bytes,
             sha256: sha,
         });
     }
@@ -324,7 +359,11 @@ pub fn run(
     let result = ExportResult {
         records: report.manifest.records,
         unique_urls: report.manifest.unique_urls,
-        formats: spec.format_names(),
+        formats: report
+            .formats
+            .iter()
+            .map(|f| f.as_str().to_string())
+            .collect(),
         files: produced
             .iter()
             .map(|f| ProducedFileName {

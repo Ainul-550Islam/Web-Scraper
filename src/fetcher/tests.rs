@@ -27,7 +27,7 @@ fn retry_after_seconds() {
     h.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
     assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(120)));
     h.insert(reqwest::header::RETRY_AFTER, "999999".parse().unwrap());
-    assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(3600)));
+    assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(999999)));
 }
 
 #[test]
@@ -36,11 +36,13 @@ fn retry_after_http_date_future() {
     let mut h = reqwest::header::HeaderMap::new();
     h.insert(
         reqwest::header::RETRY_AFTER,
-        "Sat, 01 Jan 2044 00:05:00 GMT".parse().unwrap(),
+        httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(7200))
+            .parse()
+            .unwrap(),
     );
     let d = parse_retry_after(&h).expect("parsed");
     assert!(
-        d > Duration::from_secs(300) && d <= Duration::from_secs(3600),
+        d > Duration::from_secs(7190) && d <= Duration::from_secs(7200),
         "{d:?}"
     );
 }

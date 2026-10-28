@@ -1,7 +1,8 @@
 // ConfigStudio — split from ConfigStudio.tsx; barrel re-exports keep every public path & name
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useConnection } from "../../../lib/connection";
+import { useRoute } from "../../../app/router";
 import { CONTROLS, CONTROLS_BY_SECTION, crossFieldErrors, getPath, setPath, validateControl } from "../../../lib/configSchema";
 import type { ConfigDocument } from "../../../lib/types";
 import { Button, Card, CopyButton, PageHeader, StatusChip, Segmented } from "../../../components/ui";
@@ -25,26 +26,29 @@ import { StudioIndex } from "./StudioIndex";
  */
 export default function ConfigStudio() {
   const conn = useConnection();
+  const route = useRoute();
   const { push } = useToasts();
   const server = conn.config;
-  const [draft, setDraft] = useState<ConfigDocument | null>(null);
+  const sourceKey = server?.config_sha256 ?? null;
+  const [draftState, setDraftState] = useState<{ sourceKey: string | null; value: ConfigDocument | null }>({ sourceKey: null, value: null });
+  const draft = server ? draftState.sourceKey === sourceKey ? draftState.value : structuredClone(server) : null;
+  const setDraft = useCallback((update: ConfigDocument | null | ((current: ConfigDocument | null) => ConfigDocument | null)) => {
+    setDraftState((current) => {
+      const base = current.sourceKey === sourceKey ? current.value : server ? structuredClone(server) : null;
+      const value = typeof update === "function" ? update(base) : update;
+      return { sourceKey, value };
+    });
+  }, [server, sourceKey]);
   const [jsonView, setJsonView] = useState<"form" | "json">("form");
   const [builderTarget, setBuilderTarget] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // seed draft from server doc; reseed when a different server doc arrives
-  useEffect(() => {
-    if (server) setDraft(structuredClone(server));
-  }, [server?.config_sha256]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ?target= from the command palette
-  useEffect(() => {
-    const t = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("target");
-    if (t && draft) {
-      const idx = draft.targets.findIndex((x) => x.id === t);
-      if (idx >= 0) setBuilderTarget(idx);
-    }
-  }, [draft]);
+  // Draft validity is keyed to the server's content digest. A new server
+  // document is cloned on first render; local edits remain local afterward.
+  const queryTarget = route.query.get("target");
+  const [dismissedQueryTarget, setDismissedQueryTarget] = useState<string | null>(null);
+  const queryTargetIndex = dismissedQueryTarget !== queryTarget && queryTarget && draft ? draft.targets.findIndex((target) => target.id === queryTarget) : -1;
+  const activeBuilderTarget = builderTarget ?? (queryTargetIndex >= 0 ? queryTargetIndex : null);
 
   const dirtyPaths = useMemo(() => {
     if (!draft || !server) return new Set<string>();
@@ -269,18 +273,18 @@ export default function ConfigStudio() {
         )
       )}
 
-      {builderTarget !== null && draft && (
+      {activeBuilderTarget !== null && draft && (
         <TargetBuilder
-          target={draft.targets[builderTarget]!}
+          target={draft.targets[activeBuilderTarget]!}
           onChange={(t) =>
             setDraft((d) => {
               if (!d) return d;
               const targets = [...d.targets];
-              targets[builderTarget] = t;
+              targets[activeBuilderTarget] = t;
               return { ...d, targets };
             })
           }
-          onClose={() => setBuilderTarget(null)}
+          onClose={() => { setBuilderTarget(null); setDismissedQueryTarget(queryTarget); }}
         />
       )}
     </Page>

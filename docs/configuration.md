@@ -34,7 +34,7 @@ Recommended secret fields: `admin_token`, `output.Postgres.dsn`,
 | `max_retries` | int | `3` | transport/5xx retries per request; **≤ 10** |
 | `retry_base_ms` | int | `500` | exponential base; **≤ 60000** |
 | `max_single_wait_ms` | int | `15000` | per-sleep cap inside the retry loop |
-| `max_response_bytes` | int | `16777216` | hard body cap (declared + streamed); **≥ 4096** |
+| `max_response_bytes` | int | `16777216` | hard body cap (declared + streamed); **4096..=64 MiB** and `cap × effective workers` ≤ 1 GiB |
 | `max_pages` | int | `500` | global budget; **0 refused** |
 | `max_inflight_per_proxy` | int | `0` | per-egress in-flight budget: at the cap a request fails fast back into the retry lane (backpressure, not a new failure mode); 0 = unlimited |
 | `max_records_per_run` | int | `0` | write-side hard cap: the run drains gracefully at the limit (checkpoints, audit, exit 0 intact); 0 = unlimited |
@@ -81,7 +81,7 @@ hammered, and the skip is visible (`breaker_rejected` counter,
 401/403/429/451: refusals are answers, not outages.
 | `redis_url` | url | off | **redis:// or rediss:// only**; AUTH to a remote host over plain TCP is refused |
 | `metrics_addr` | host:port | `127.0.0.1:9678` | `""` disables admin; non-loopback **requires** `admin_token`; port 0..=65535 |
-| `admin_token` | string | none | with token ⇒ all admin routes authed except `/health`; **≥ 12 chars**; `""` refused; inject via `${HARVEST_ADMIN_TOKEN}` |
+| `admin_token` | string | none | with token ⇒ all admin routes authed except `/health` and `/live`; **≥ 12 chars**; `""` refused; inject via `${HARVEST_ADMIN_TOKEN}` |
 | `schedule.every_secs` | int | `3600` | `serve` spacing (`0` back-to-back only valid with `runs ≥ 1`) |
 | `schedule.runs` | int | `0` | `0` = until stopped |
 | `schedule.history_path` | path | `out/runs.jsonl` | append-only run history |
@@ -98,7 +98,7 @@ hammered, and the skip is visible (`breaker_rejected` counter,
 | `follow_links` | `false` | discovery only when on |
 | `link_selector` | none | CSS selector narrowing href discovery (html, follow_links) |
 | `include` / `exclude` | `[]` | **substring** match on the absolute URL; exclude wins |
-| `max_pages` | `20` | per-target budget |
+| `max_pages` | `20` | per-target hard budget; must be ≥ 1 (0 is rejected; remove the target to disable it) |
 | `extract` | — | map of output-field → rule; empty is an error |
 | `schema` | `off` | declared record types + enforcement (`off`/`coerce`/`strict`) with quarantine lane — see below |
 | `sitemap` | `false` | seed additionally from `Sitemap:` in robots.txt / `/sitemap.xml` |
@@ -197,7 +197,7 @@ at most one POST per run; logs show the **origin only**. `no_data` counts
 
 no targets · browser-spoof UA with robots on · concurrency > 512 ·
 timeouts out of range · retries > 10 · `retry_base_ms` > 60000 ·
-`max_response_bytes` < 4096 · `max_pages` = 0 · duplicate proxy ids ·
+`max_response_bytes` outside 4096..=64 MiB or response-cap × effective-workers > 1 GiB · global or per-target `max_pages` = 0 · duplicate proxy ids ·
 duplicate target ids · malformed target/proxy ids (ids are slugs:
 `a-z 0-9 . _ -`, ≤ 64 bytes, no leading dot, no `..`, no trailing dot — they
 become path components and metric labels) ·
@@ -237,8 +237,10 @@ references stay unresolved, so migrating never copies secrets to disk.
 
 The production audit (soft, all five findings are advisory): `respect_robots`
 off, any domain policy above 5 req/s, `max_retries` ≥ 8, concurrency > 64,
-`max_response_bytes` > 64 MiB. `GET /config` and `harvest config inspect`
-surface them as `_production`, load notes as `_warnings`, and `_backends`
+and an estimated response-buffer reservation above 256 MiB. Hard validation
+also refuses any single response cap above 64 MiB or a `cap × effective workers`
+reservation above 1 GiB. `GET /config` and `harvest config inspect` surface
+soft findings as `_production`, load notes as `_warnings`, and `_backends`
 (which optional storages this binary was compiled with).
 
 ## Environment variables read by the code

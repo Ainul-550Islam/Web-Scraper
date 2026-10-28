@@ -3,7 +3,7 @@
 //! and an embedded admin/metrics HTTP server.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,9 +15,14 @@ use url::Url;
 
 use crate::admin;
 use crate::breaker::{Breaker, BreakerEvent, Permit};
+#[cfg(feature = "browser")]
+use crate::browser::{
+    credentials::EnvironmentCredentialResolver, interaction, navigation, navigation::WaitUntil,
+    BrowserRuntime,
+};
 use crate::config::Config;
 use crate::events::EventKind;
-use crate::exec::{RequestContext, RequestPlan};
+use crate::exec::{ExecutionMeta, RequestContext, RequestPlan};
 use crate::extract::{self, Extractor, JsonExtractor};
 use crate::fetcher::{FetchError, Fetcher};
 use crate::job::{Job, JobId};
@@ -27,12 +32,16 @@ use crate::proxy::ProxyPool;
 use crate::retry::RetryBudget;
 use crate::robots::Robots;
 use crate::runtime::{Runtime, RuntimeSlot};
-use crate::sched::{CrawlQueue, Popped};
+use crate::sched::{CrawlQueue, Popped, PushError};
 use crate::sink::{self, Record, Sink};
 use crate::sitemap::{self, Sitemap};
 use crate::supervisor::{CancelToken, RestartPolicy, Supervisor, TaskSet};
 use crate::transform::TargetPipeline;
 use scraper::{Html, Selector};
+
+const MAX_DLQ_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DLQ_LINE_BYTES: usize = 1024 * 1024;
+const MAX_DLQ_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Default)]
 pub struct TargetSummary {
@@ -82,6 +91,15 @@ pub struct Summary {
 
 type RobotsMap = Arc<tokio::sync::Mutex<HashMap<String, (Instant, Arc<Robots>)>>>;
 
+#[cfg(feature = "browser")]
+struct BrowserFetch {
+    outcome: crate::fetcher::FetchOutcome,
+    challenge: crate::browser::challenge::ChallengeObservation,
+    session_created: bool,
+    selector_count: usize,
+    action_count: usize,
+}
+
 /// Stop-aware one-shot entry (used by CLI ctrl-c handling).
 pub async fn run_with_stop(
     cfg: Config,
@@ -103,6 +121,9 @@ pub async fn run_with_stop(
     ));
     state.attach_runtime(ctx.runtime.clone());
     state.with_config(cfg.clone(), cfg.source_path.clone());
+    let drain_task = state
+        .control()
+        .and_then(|control| stop.clone().map(|flag| control.drain_on_stop(flag)));
     let admin_task = if cfg.metrics_addr.is_empty() {
         None
     } else {
@@ -114,7 +135,13 @@ pub async fn run_with_stop(
     state.set_running(true);
     let summary = run_with_opt(cfg, ctx, stop, retry_dlq, resume).await;
     state.set_running(false);
+    if let Some(control) = state.control() {
+        control.drain().await;
+    }
     if let Some(t) = admin_task {
+        t.abort();
+    }
+    if let Some(t) = drain_task {
         t.abort();
     }
     summary
@@ -148,8 +175,10 @@ pub async fn run(cfg: Config) -> Result<Summary> {
 
 /// Core collection run against a caller-owned context (used by the
 /// scheduler, which keeps the admin server and pool alive between runs).
-/// `stop`: when set, workers finish the in-flight job and exit — queued jobs
-/// are abandoned politely (graceful drain, no mid-request kill).
+/// `stop`: workers stop admitting new jobs; an in-flight request interrupted
+/// by operator cancellation is returned to the pending queue (and checkpointed
+/// when configured), then workers exit. Queued-but-unstarted work is likewise
+/// left pending rather than being discarded by the worker loop.
 pub async fn run_with(
     cfg: Arc<Config>,
     ctx: RunCtx,
@@ -171,6 +200,7 @@ pub async fn run_with_opt(
     retry_dlq: bool,
     resume: bool,
 ) -> Result<Summary> {
+    let _output_guard = ctx.runtime.output_guard(stop.as_deref()).await?;
     let started = Instant::now();
     let metrics = ctx.metrics.clone();
     let pool = ctx.pool.clone();
@@ -183,6 +213,8 @@ pub async fn run_with_opt(
         cfg.max_records_per_run,
     ));
     let cap_announced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let halt = Arc::new(AtomicBool::new(false));
+    let fatal_error = Arc::new(std::sync::Mutex::new(None::<String>));
     // Engine-layer runtime: event bus, accounting, breakers, supervisor.
     // Created before anything can fail hard so the events log exists from
     // the first lifecycle moment of the run.
@@ -198,9 +230,18 @@ pub async fn run_with_opt(
             .unwrap_or_default(),
     );
     runtime.attach_supervisor(supervisor.clone());
-    let fetcher = Arc::new(Fetcher::new(cfg.clone(), pool.clone()));
-    let politeness = Arc::new(Politeness::new(&cfg));
-    let (sink, sink_path) = sink::build(&cfg.output)?;
+    let politeness = ctx.runtime.shared_pacing(&cfg);
+    politeness.begin_epoch();
+    let fetcher = Arc::new(
+        Fetcher::new(cfg.clone(), pool.clone()).with_cancellation(
+            stop.iter()
+                .cloned()
+                .chain(std::iter::once(halt.clone()))
+                .collect(),
+            Some(politeness.clone()),
+        ),
+    );
+    let (sink, sink_path) = sink::build_for_targets(&cfg.output, &cfg.targets)?;
     let audit: Option<Arc<crate::audit::Recorder>> = cfg
         .audit_path
         .as_ref()
@@ -218,9 +259,19 @@ pub async fn run_with_opt(
     let extractors: Arc<Vec<ExtractMode>> = Arc::new(
         cfg.targets
             .iter()
-            .map(|t| match t.mode.as_str() {
-                "json" => Ok(ExtractMode::Json(JsonExtractor::compile(&t.extract)?)),
-                _ => Ok(ExtractMode::Html(Extractor::compile(&t.extract)?)),
+            .map(|t| {
+                if t.selector_tree.is_some() {
+                    Ok(if t.mode == "json" {
+                        ExtractMode::TreeJson
+                    } else {
+                        ExtractMode::TreeHtml
+                    })
+                } else {
+                    match t.mode.as_str() {
+                        "json" => Ok(ExtractMode::Json(JsonExtractor::compile(&t.extract)?)),
+                        _ => Ok(ExtractMode::Html(Extractor::compile(&t.extract)?)),
+                    }
+                }
             })
             .collect::<Result<Vec<_>>>()?,
     );
@@ -268,9 +319,13 @@ pub async fn run_with_opt(
             tracing::warn!(path = %p.display(), "no checkpoint file — starting fresh");
         }
     } else if let Some(p) = cfg.ckpt_path.as_ref() {
-        if p.exists() {
-            tracing::info!(path = %p.display(), "fresh run — removing stale checkpoint");
-            std::fs::remove_file(p).ok();
+        match crate::fsutil::remove_file_nofollow(p) {
+            Ok(()) => tracing::info!(path = %p.display(), "fresh run — removed stale checkpoint"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove stale checkpoint {}", p.display()));
+            }
         }
     }
     let ckpt: Option<Arc<CkptCtl>> = cfg.ckpt_path.as_ref().map(|p| {
@@ -353,18 +408,60 @@ pub async fn run_with_opt(
     let mut dlq_existing: std::collections::BTreeMap<String, serde_json::Value> =
         Default::default();
     let mut retried: std::collections::HashSet<String> = Default::default();
-    if retry_dlq {
-        if let Some(p) = &cfg.dlq_path {
-            if let Ok(txt) = std::fs::read_to_string(p) {
-                for line in txt.lines() {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(u) = v.get("url").and_then(|x| x.as_str()).map(str::to_string) {
-                            retried.insert(u.clone());
-                            dlq_existing.insert(u, v);
-                        }
-                    }
-                }
+    if let Some(path) = &cfg.dlq_path {
+        let contents = match read_dlq(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read DLQ {}", path.display()));
             }
+        };
+        for (line_no, line) in contents.lines().enumerate() {
+            if line.len() > MAX_DLQ_LINE_BYTES {
+                anyhow::bail!(
+                    "DLQ {} line {} exceeds the {}-byte limit",
+                    path.display(),
+                    line_no + 1,
+                    MAX_DLQ_LINE_BYTES
+                );
+            }
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+                tracing::warn!(line = line_no + 1, "ignoring malformed DLQ line");
+                continue;
+            };
+            let Some(url) = value
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                tracing::warn!(line = line_no + 1, "ignoring DLQ entry without a URL");
+                continue;
+            };
+            if dlq_existing.len() >= MAX_DLQ_ENTRIES {
+                anyhow::bail!(
+                    "DLQ {} exceeds the {}-entry limit",
+                    path.display(),
+                    MAX_DLQ_ENTRIES
+                );
+            }
+            if value
+                .get("attempts")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|attempts| attempts >= cfg.dlq_max_attempts as u64)
+            {
+                value["dead_for_good"] = serde_json::Value::Bool(true);
+            }
+            let key = url.to_string();
+            if retry_dlq
+                && value.get("retryable").and_then(serde_json::Value::as_bool) != Some(false)
+                && value
+                    .get("dead_for_good")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                retried.insert(key.clone());
+            }
+            dlq_existing.insert(key, value);
         }
     }
 
@@ -374,7 +471,6 @@ pub async fn run_with_opt(
         let sctx = SeedCtx {
             cfg: &cfg,
             fetcher: &fetcher,
-            politeness: &politeness,
             metrics: &metrics,
             robots_cache: &robots_cache,
             audit: audit.clone(),
@@ -410,33 +506,43 @@ pub async fn run_with_opt(
             }
         }
         if retry_dlq {
-            let by_id: std::collections::HashMap<&str, usize> = cfg
-                .targets
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (t.id.as_str(), i))
-                .collect();
-            for u in &retried {
-                let Ok(parsed) = Url::parse(u) else { continue };
-                let host = parsed.host_str().unwrap_or_default().to_string();
-                let ti = cfg
-                    .targets
-                    .iter()
-                    .position(|t| {
-                        Url::parse(&t.start_url)
-                            .ok()
-                            .and_then(|su| su.host_str().map(|h| h == host))
-                            .unwrap_or(false)
-                            && by_id.contains_key(t.id.as_str())
-                    })
-                    .unwrap_or(0);
-                visited.lock().unwrap_or_else(|p| p.into_inner())[ti].insert(dedup_key(&parsed));
-                if queue.push(mk_job(&cfg, parsed, 0, ti)).is_ok() {
+            for url in &retried {
+                let Ok(parsed) = Url::parse(url) else {
+                    continue;
+                };
+                let Some(entry) = dlq_existing.get(url) else {
+                    continue;
+                };
+                let target_index = target_index_for_dlq(&cfg, entry, &parsed);
+                let Some(target_index) = target_index else {
+                    continue;
+                };
+                if !crate::config::approved_url(&cfg.targets[target_index], &parsed, 0) {
+                    continue;
+                }
+                visited.lock().unwrap_or_else(|p| p.into_inner())[target_index]
+                    .insert(dedup_key(&parsed));
+                if queue.push(mk_job(&cfg, parsed, 0, target_index)).is_ok() {
                     outstanding.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
     }
+
+    #[cfg(feature = "browser")]
+    let browser_runtime = if cfg.browser.enabled {
+        let mut browser_cfg = cfg.browser.clone();
+        if browser_cfg.user_agent_override.is_none() {
+            browser_cfg.user_agent_override = Some(cfg.user_agent.clone());
+        }
+        Some(
+            BrowserRuntime::launch(browser_cfg)
+                .await
+                .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        None
+    };
 
     let n_workers = cfg.concurrency.clamp(1, 64);
     let mut handles = Vec::new();
@@ -445,6 +551,10 @@ pub async fn run_with_opt(
             worker_id: worker,
             cfg: cfg.clone(),
             fetcher: fetcher.clone(),
+            #[cfg(feature = "browser")]
+            browser_runtime: browser_runtime.clone(),
+            #[cfg(feature = "browser")]
+            browser_egress: Arc::new(std::sync::Mutex::new(HashMap::new())),
             politeness: politeness.clone(),
             pool: pool.clone(),
             sink: sink.clone(),
@@ -456,6 +566,7 @@ pub async fn run_with_opt(
             record_cap: record_cap.clone(),
             cap_announced: cap_announced.clone(),
             job_failed: Arc::new(AtomicBool::new(false)),
+            job_deferred: Arc::new(AtomicBool::new(false)),
             job_fail_reason: Arc::new(std::sync::Mutex::new(String::new())),
             visited: visited.clone(),
             seen_fp: seen_fp.clone(),
@@ -466,6 +577,8 @@ pub async fn run_with_opt(
             pipelines: pipelines.clone(),
             robots_cache: robots_cache.clone(),
             stop: stop.clone(),
+            halt: halt.clone(),
+            fatal_error: fatal_error.clone(),
             per_target: per_target.clone(),
             dlq_fail: dlq_fail.clone(),
             dlq_ok: dlq_ok.clone(),
@@ -525,7 +638,12 @@ pub async fn run_with_opt(
             }
         }
     }
-    sink.flush()?;
+    if let Some(message) = fatal_error.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        first_err.get_or_insert_with(|| anyhow::anyhow!(message));
+    }
+    if let Err(e) = sink::finish_owned(&sink).await {
+        first_err.get_or_insert(e);
+    }
 
     // Stragglers: ticker first (abort-on-zero-timeout), queue detached so
     // post-run snapshots never show a stale queue.
@@ -541,8 +659,19 @@ pub async fn run_with_opt(
                 "checkpoint finalized — continue with `harvest run --resume`"
             );
         } else {
-            std::fs::remove_file(&c.path).ok();
-            tracing::info!("run complete — checkpoint removed (nothing left to resume)");
+            match crate::fsutil::remove_file_nofollow(&c.path) {
+                Ok(()) => {
+                    tracing::info!("run complete — checkpoint removed (nothing left to resume)")
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::info!("run complete — no checkpoint to remove");
+                }
+                Err(error) => {
+                    first_err.get_or_insert_with(|| {
+                        anyhow::anyhow!("checkpoint removal failed: {error}")
+                    });
+                }
+            }
         }
     }
 
@@ -590,51 +719,71 @@ pub async fn run_with_opt(
         duration_ms: started.elapsed().as_millis() as u64,
         per_target: std::mem::take(&mut *per_target.lock().unwrap_or_else(|p| p.into_inner())),
     };
-    if let Some(p) = &cfg.dlq_path {
+    if let Some(path) = &cfg.dlq_path {
         let ok = dlq_ok.lock().unwrap_or_else(|p| p.into_inner());
         let fails = dlq_fail.lock().unwrap_or_else(|p| p.into_inner());
         let mut kept: Vec<serde_json::Value> = Vec::new();
         let mut seen_urls: std::collections::HashSet<String> = Default::default();
-        if retry_dlq {
-            for (u, v) in &dlq_existing {
-                seen_urls.insert(u.clone());
-                if ok.contains(u) {
-                    continue; // recovered — drop from DLQ
-                }
-                if let Some(reason) = fails.get(u) {
-                    let a = v.get("attempts").and_then(|x| x.as_u64()).unwrap_or(0) + 1;
-                    if a >= cfg.dlq_max_attempts as u64 {
-                        continue; // dead for good
+        for (url, value) in &dlq_existing {
+            seen_urls.insert(url.clone());
+            if retry_dlq && ok.contains(url) {
+                continue; // recovered — drop from DLQ
+            }
+            let mut next = value.clone();
+            if retry_dlq
+                && value
+                    .get("dead_for_good")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                if let Some(reason) = fails.get(url) {
+                    let attempts = value
+                        .get("attempts")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    next["attempts"] = attempts.into();
+                    next["reason"] = crate::config::redact_observation_text(reason).into();
+                    if attempts >= cfg.dlq_max_attempts as u64 {
+                        next["dead_for_good"] = serde_json::Value::Bool(true);
                     }
-                    let mut nv = v.clone();
-                    nv["attempts"] = a.into();
-                    nv["reason"] = reason.clone().into();
-                    kept.push(nv);
-                } else {
-                    kept.push(v.clone()); // not attempted this run (drain/budget)
                 }
             }
-        } else {
-            for (u, v) in &dlq_existing {
-                seen_urls.insert(u.clone());
-                kept.push(v.clone());
-            }
+            kept.push(safe_dlq_entry(&cfg, url, next));
         }
-        for (u, reason) in fails.iter() {
-            if seen_urls.contains(u) {
+        for (url, reason) in fails.iter() {
+            if seen_urls.contains(url) || cfg.dlq_max_attempts < 1 {
                 continue;
             }
-            if (cfg.dlq_max_attempts) < 1 {
-                continue;
+            let target_id = target_id_for_url(&cfg, url);
+            let mut entry = serde_json::json!({
+                "url": url,
+                "reason": crate::config::redact_observation_text(reason),
+                "attempts": 1,
+            });
+            if let Some(target_id) = target_id {
+                entry["target"] = target_id.into();
             }
-            kept.push(serde_json::json!({"url": u, "reason": reason, "attempts": 1}));
+            if cfg.dlq_max_attempts <= 1 {
+                entry["dead_for_good"] = serde_json::Value::Bool(true);
+            }
+            kept.push(safe_dlq_entry(&cfg, url, entry));
         }
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).ok();
+        match serialize_dlq_entries(&kept) {
+            Ok(body) => match crate::fsutil::write_private_atomic(path, body.as_bytes()) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), entries = kept.len(), "dlq rewritten")
+                }
+                Err(error) => {
+                    first_err.get_or_insert_with(|| {
+                        anyhow::anyhow!("DLQ write failed for {}: {error}", path.display())
+                    });
+                }
+            },
+            Err(error) => {
+                first_err.get_or_insert(error.context("cannot safely serialize DLQ"));
+            }
         }
-        let body: String = kept.iter().map(|v| format!("{v}\n")).collect();
-        std::fs::write(p, body).ok();
-        tracing::info!(path = %p.display(), entries = kept.len(), "dlq rewritten");
     }
     runtime.end_shutdown(&json!({
         "written": summary.written,
@@ -652,11 +801,105 @@ pub async fn run_with_opt(
             Err(e) => tracing::warn!(err = %e, "events log writer task died"),
         }
     }
+    #[cfg(feature = "browser")]
+    if let Some(runtime) = browser_runtime {
+        if let Err(error) = runtime.shutdown().await {
+            first_err
+                .get_or_insert_with(|| anyhow::anyhow!("browser runtime cleanup failed: {error}"));
+        }
+    }
     tracing::info!(sink = %sink_path.display(), summary = ?summary, "run complete");
     if let Some(e) = first_err {
         return Err(e);
     }
     Ok(summary)
+}
+
+fn read_dlq(path: &Path) -> std::io::Result<String> {
+    let bytes = crate::fsutil::read_bounded(path, MAX_DLQ_BYTES)?;
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn target_id_for_url(cfg: &Config, url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    cfg.targets
+        .iter()
+        .find(|target| crate::config::approved_url(target, &parsed, 0))
+        .map(|target| target.id.clone())
+}
+
+fn target_index_for_dlq(cfg: &Config, entry: &serde_json::Value, url: &Url) -> Option<usize> {
+    let recorded = entry
+        .get("target_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("target").and_then(serde_json::Value::as_str));
+    if let Some(target_id) = recorded {
+        if let Some(index) = cfg.targets.iter().position(|target| target.id == target_id) {
+            return Some(index);
+        }
+        // Older distributed DLQ entries stored the Redis queue prefix in
+        // `target`, not a configured target id. Resolve those by URL, then
+        // let the caller re-check the exact approved target scope.
+    }
+    cfg.targets
+        .iter()
+        .position(|target| crate::config::approved_url(target, url, 0))
+}
+
+fn safe_dlq_entry(
+    cfg: &Config,
+    original_url: &str,
+    mut entry: serde_json::Value,
+) -> serde_json::Value {
+    crate::config::redact_observation(&mut entry);
+    let safe_url = crate::config::redact_credentials(original_url);
+    if let Some(fields) = entry.as_object_mut() {
+        fields.insert("url".into(), safe_url.clone().into());
+        if !fields.contains_key("target") {
+            if let Some(target_id) = target_id_for_url(cfg, original_url) {
+                fields.insert("target".into(), target_id.into());
+            }
+        }
+        if safe_url != original_url {
+            fields.insert("retryable".into(), serde_json::Value::Bool(false));
+        }
+        if let Some(serde_json::Value::String(reason)) = fields.get_mut("reason") {
+            *reason = truncate_utf8(&crate::config::redact_observation_text(reason), 4096);
+        }
+    }
+    entry
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn serialize_dlq_entries(entries: &[serde_json::Value]) -> Result<String> {
+    if entries.len() > MAX_DLQ_ENTRIES {
+        anyhow::bail!("DLQ exceeds the {MAX_DLQ_ENTRIES}-entry limit");
+    }
+    let mut body = String::new();
+    for entry in entries {
+        let line = serde_json::to_string(entry).context("serialize DLQ entry")?;
+        let line_bytes = line.len().saturating_add(1);
+        if line_bytes > MAX_DLQ_LINE_BYTES {
+            anyhow::bail!("DLQ entry exceeds the {MAX_DLQ_LINE_BYTES}-byte line limit");
+        }
+        if (body.len() as u64).saturating_add(line_bytes as u64) > MAX_DLQ_BYTES {
+            anyhow::bail!("DLQ exceeds the {MAX_DLQ_BYTES}-byte total limit");
+        }
+        body.push_str(&line);
+        body.push('\n');
+    }
+    Ok(body)
 }
 
 /// Fetch-and-cache robots.txt per origin (TTL from config); shared by the
@@ -704,7 +947,6 @@ async fn robots_for(
 struct SeedCtx<'a> {
     cfg: &'a Arc<Config>,
     fetcher: &'a Arc<Fetcher>,
-    politeness: &'a Arc<Politeness>,
     metrics: &'a Arc<Metrics>,
     robots_cache: &'a RobotsMap,
     audit: Option<Arc<crate::audit::Recorder>>,
@@ -713,6 +955,20 @@ struct SeedCtx<'a> {
 impl SeedCtx<'_> {
     /// robots-gate + pace + fetch one sitemap document body.
     async fn grab(&self, u: &Url) -> Option<String> {
+        let approved = self
+            .cfg
+            .targets
+            .iter()
+            .flat_map(|t| std::iter::once(t.start_url.as_str()).chain(t.sitemap_url.as_deref()))
+            .filter_map(|s| Url::parse(s).ok())
+            .any(|start| {
+                start.origin() == u.origin()
+                    && start.username() == u.username()
+                    && start.password() == u.password()
+            });
+        if !approved || u.as_str().len() > 8192 {
+            return None;
+        }
         let host = u.host_str().unwrap_or_default().to_string();
         if self.cfg.respect_robots {
             let r = robots_for(
@@ -724,16 +980,18 @@ impl SeedCtx<'_> {
                 &origin(u),
             )
             .await;
-            if !r.allows(u.path()) {
+            if !r.allows_url(u) {
                 if let Some(a) = &self.audit {
                     a.note_robots_denial(&host);
                 }
-                tracing::warn!(url = %u, "sitemap refused by robots.txt; honoring");
+                tracing::warn!(url = %crate::config::redact_credentials(u.as_str()), "sitemap refused by robots.txt; honoring");
                 return None;
             }
         }
         let t = Instant::now();
-        self.politeness.wait(&host, self.cfg, self.metrics).await;
+        if !self.fetcher.wait_initial(&host, self.metrics).await {
+            return None;
+        }
         if let Some(a) = &self.audit {
             a.note_wait(&host, t.elapsed());
         }
@@ -748,7 +1006,7 @@ impl SeedCtx<'_> {
                 if let Some(a) = &self.audit {
                     a.note_error(&host);
                 }
-                tracing::warn!(url = %u, err = ?e, "sitemap fetch failed; continuing without it");
+                tracing::warn!(url = %crate::config::redact_credentials(u.as_str()), err = ?e, "sitemap fetch failed; continuing without it");
                 None
             }
         }
@@ -762,6 +1020,10 @@ async fn sitemap_seeds(ctx: &SeedCtx<'_>) -> Vec<(usize, Url)> {
 
     let mut out = Vec::new();
     for (i, t) in cfg.targets.iter().enumerate() {
+        if out.len() >= MAX_TOTAL_URLS.min(cfg.max_pages) {
+            break;
+        }
+        let candidate_cap = (MAX_TOTAL_URLS.min(cfg.max_pages) - out.len()).min(t.max_pages);
         if !t.sitemap {
             continue;
         }
@@ -787,15 +1049,30 @@ async fn sitemap_seeds(ctx: &SeedCtx<'_>) -> Vec<(usize, Url)> {
         let rel = |base: &Url, s: &str| Url::parse(s).or_else(|_| base.join(s)).ok();
         let mut candidates: Vec<Url> = Vec::new();
         match sitemap::parse(&body) {
-            Sitemap::Urls(v) => candidates.extend(v.iter().filter_map(|l| rel(&su, l))),
+            Sitemap::Urls(v) => candidates.extend(
+                v.iter()
+                    .filter(|l| l.len() <= 8192)
+                    .filter_map(|l| rel(&su, l))
+                    .take(candidate_cap),
+            ),
             Sitemap::Index(children) => {
                 for c in children.iter().take(MAX_CHILD_DOCS) {
+                    if candidates.len() >= candidate_cap {
+                        break;
+                    }
                     let Some(cu) = rel(&su, c) else { continue };
                     if let Some(cb) = ctx.grab(&cu).await {
                         if let Sitemap::Urls(inner) = sitemap::parse(&cb) {
-                            candidates.extend(inner.iter().filter_map(|l| rel(&cu, l)));
+                            let remaining = candidate_cap - candidates.len();
+                            candidates.extend(
+                                inner
+                                    .iter()
+                                    .filter(|l| l.len() <= 8192)
+                                    .filter_map(|l| rel(&cu, l))
+                                    .take(remaining),
+                            );
                         } else {
-                            tracing::warn!(url = %cu, "nested sitemapindex ignored (depth 1 only)");
+                            tracing::warn!(url = %crate::config::redact_credentials(cu.as_str()), "nested sitemapindex ignored (depth 1 only)");
                         }
                     }
                 }
@@ -803,7 +1080,7 @@ async fn sitemap_seeds(ctx: &SeedCtx<'_>) -> Vec<(usize, Url)> {
         }
         let mut pushed = 0usize;
         for abs in candidates {
-            if pushed >= MAX_TOTAL_URLS {
+            if out.len() >= MAX_TOTAL_URLS.min(cfg.max_pages) || pushed >= candidate_cap {
                 tracing::warn!(target = %t.id, cap = MAX_TOTAL_URLS, "sitemap seed truncated at cap");
                 break;
             }
@@ -830,7 +1107,7 @@ async fn sitemap_seeds(ctx: &SeedCtx<'_>) -> Vec<(usize, Url)> {
                     &origin(&abs),
                 )
                 .await;
-                if !r.allows(abs.path()) {
+                if !r.allows_url(&abs) {
                     ctx.metrics.robot_denied();
                     if let Some(a) = &ctx.audit {
                         a.note_robots_denial(abs.host_str().unwrap_or_default());
@@ -937,9 +1214,11 @@ fn mk_job(cfg: &Config, url: Url, depth: usize, target: usize) -> Job {
 }
 
 /// Per-target extraction backend, chosen by `target.mode`.
-enum ExtractMode {
+pub(crate) enum ExtractMode {
     Html(Extractor),
     Json(JsonExtractor),
+    TreeHtml,
+    TreeJson,
 }
 
 #[derive(Clone)]
@@ -947,6 +1226,11 @@ struct WorkerCtx {
     worker_id: usize,
     cfg: Arc<Config>,
     fetcher: Arc<Fetcher>,
+    #[cfg(feature = "browser")]
+    browser_runtime: Option<BrowserRuntime>,
+    #[cfg(feature = "browser")]
+    browser_egress: Arc<std::sync::Mutex<HashMap<usize, usize>>>,
+
     politeness: Arc<Politeness>,
     pool: Arc<ProxyPool>,
     sink: Arc<dyn Sink>,
@@ -965,6 +1249,9 @@ struct WorkerCtx {
     /// exchange is recorded) sets it; `finish_job` consumes it. One worker
     /// owns one context at a time, so a plain flag is race-free by design.
     job_failed: Arc<AtomicBool>,
+    /// A popped job was returned to the queue instead of reaching a terminal
+    /// result; finish_job releases its active slot without marking success.
+    job_deferred: Arc<AtomicBool>,
     job_fail_reason: Arc<std::sync::Mutex<String>>,
     visited: Arc<std::sync::Mutex<Vec<HashSet<String>>>>,
     seen_fp: Arc<std::sync::Mutex<Vec<HashSet<crate::ids::RecordId>>>>,
@@ -975,6 +1262,8 @@ struct WorkerCtx {
     pipelines: Arc<Vec<TargetPipeline>>,
     robots_cache: RobotsMap,
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    halt: Arc<AtomicBool>,
+    fatal_error: Arc<std::sync::Mutex<Option<String>>>,
     per_target: Arc<std::sync::Mutex<std::collections::BTreeMap<String, TargetSummary>>>,
     dlq_fail: Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>,
     dlq_ok: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -986,10 +1275,11 @@ struct WorkerCtx {
 
 async fn worker_loop(ctx: WorkerCtx) {
     loop {
-        if ctx
-            .stop
-            .as_ref()
-            .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+        if ctx.halt.load(Ordering::Relaxed)
+            || ctx
+                .stop
+                .as_ref()
+                .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
         {
             ctx.supervisor.note_draining(ctx.worker_id);
             tracing::debug!("stop flag set — draining");
@@ -1014,6 +1304,14 @@ async fn worker_loop(ctx: WorkerCtx) {
                 );
                 ctx.supervisor.touch_running(ctx.worker_id);
                 let res = ctx.process(job).await;
+                if let Err(ref e) = res {
+                    ctx.halt.store(true, Ordering::Relaxed);
+                    ctx.bump(tgt, |t| t.failed += 1);
+                    ctx.fatal_error
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .get_or_insert_with(|| e.to_string());
+                }
                 ctx.queue.release(tgt);
                 ctx.outstanding.fetch_sub(1, Ordering::SeqCst);
                 ctx.finish_job(jid, tgt, &url, waited, res);
@@ -1042,6 +1340,207 @@ async fn worker_loop(ctx: WorkerCtx) {
 }
 
 impl WorkerCtx {
+    #[cfg(feature = "browser")]
+    async fn fetch_browser(
+        &self,
+        job: &Job,
+        target: &crate::config::TargetCfg,
+    ) -> crate::browser::error::BrowserResult<BrowserFetch> {
+        use crate::browser::config::SessionIsolation;
+        use crate::browser::error::BrowserError;
+        use crate::browser::session::BrowserSession;
+        use crate::proxy::provider::ProxyEndpoint;
+
+        let runtime = self
+            .browser_runtime
+            .as_ref()
+            .ok_or(BrowserError::Unsupported(
+                "configured browser runtime is absent",
+            ))?;
+        let session_key = match self.cfg.browser.session_isolation {
+            SessionIsolation::PerJob => format!("crawl.{}.job.{}", target.id, job.id.0),
+            SessionIsolation::PerTargetWorker => {
+                format!("crawl.{}.worker.{}", target.id, self.worker_id)
+            }
+        };
+        let proxy_index = if self.cfg.browser.session_isolation == SessionIsolation::PerTargetWorker
+        {
+            let mut choices = self
+                .browser_egress
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *choices.entry(job.target).or_insert_with(|| {
+                self.pool
+                    .pick(((job.target as u64) << 32) | self.worker_id as u64)
+            })
+        } else {
+            self.pool.pick(job.id.0)
+        };
+        let egress_id = self.pool.id(proxy_index);
+        let _hold = self.pool.try_hold(proxy_index).ok_or_else(|| {
+            self.metrics
+                .note_budget_denied(crate::metrics::BudgetScope::Proxy);
+            BrowserError::Policy("configured proxy egress is at its in-flight cap".into())
+        })?;
+        let proxy_url = self.pool.proxy_url(proxy_index).flatten();
+        let proxy_capability = if let Some(url) = proxy_url.as_deref() {
+            let endpoint = ProxyEndpoint {
+                id: egress_id.clone(),
+                url: url.to_owned(),
+                region: None,
+                username_secret_ref: None,
+                password_secret_ref: None,
+                supports_session_affinity: false,
+                supports_region_selection: false,
+            };
+            Some(crate::proxy::browser::capabilities(&endpoint)?)
+        } else {
+            None
+        };
+        let session_created = !runtime.contains_session(&session_key).await;
+        let session: Arc<BrowserSession> = runtime
+            .session(&session_key, Some(&egress_id), proxy_capability)
+            .await?;
+        let start_host = url::Url::parse(&target.start_url)
+            .map_err(|_| BrowserError::InvalidInput("target start URL"))?
+            .host_str()
+            .ok_or(BrowserError::InvalidInput("target host"))?
+            .to_ascii_lowercase();
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert(start_host);
+        allowed.extend(
+            self.cfg
+                .browser
+                .authorized_hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase()),
+        );
+        allowed.extend(
+            target
+                .browser
+                .allowed_hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase()),
+        );
+        let allowed_hosts: Vec<String> = allowed.into_iter().collect();
+        let request_host = job
+            .url
+            .host_str()
+            .ok_or(BrowserError::InvalidInput("crawl URL host"))?
+            .to_ascii_lowercase();
+        if !allowed_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&request_host))
+        {
+            return Err(BrowserError::Policy(
+                "browser target URL is outside the explicit host scope".into(),
+            ));
+        }
+        let t0 = Instant::now();
+        let result = async {
+            let _navigation = navigation::navigate(
+                &session,
+                job.url.as_str(),
+                WaitUntil::Load,
+                self.cfg.browser.navigation_timeout_ms,
+            )
+            .await?;
+            let resolver = EnvironmentCredentialResolver;
+            let workflow = interaction::run_workflow_scoped(
+                &session,
+                &self.cfg.browser,
+                &target.browser.workflow,
+                &resolver,
+                &allowed_hosts,
+            )
+            .await?;
+            let page = runtime.observe(&session, job.url.as_str()).await?;
+            let final_url = page
+                .final_url
+                .as_deref()
+                .ok_or(BrowserError::Protocol { status: 502 })?;
+            let final_parsed =
+                url::Url::parse(final_url).map_err(|_| BrowserError::Protocol { status: 502 })?;
+            let final_host = final_parsed
+                .host_str()
+                .ok_or(BrowserError::Protocol { status: 502 })?;
+            if !allowed_hosts
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(final_host))
+            {
+                return Err(BrowserError::Policy(
+                    "browser redirect ended outside the explicit host scope".into(),
+                ));
+            }
+            if !final_parsed.username().is_empty() || final_parsed.password().is_some() {
+                return Err(BrowserError::Policy(
+                    "browser final URL contains credentials".into(),
+                ));
+            }
+            let is_json=target.mode=="json"||page.content_type.as_deref().is_some_and(|ct|ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"));
+            let body = if is_json {
+                let value=session.execute("return document.body ? document.body.innerText : document.documentElement.innerText;",Vec::new(),self.cfg.browser.max_html_bytes).await?;
+                value.as_str().map(ToOwned::to_owned).ok_or(BrowserError::NotFound("browser JSON body"))?
+            }else{
+                page.html.clone().ok_or(BrowserError::NotFound("browser HTML snapshot"))?
+            };
+            if body.len() as u64 > self.cfg.max_response_bytes {
+                return Err(BrowserError::ContentLimit {
+                    kind: "browser response",
+                    limit: self.cfg.max_response_bytes as usize,
+                });
+            }
+            let selector_count = if let Some(tree) = &target.selector_tree {
+                let rows = if is_json { crate::selector::engine::extract_json(&body,tree,10_000)? } else { crate::selector::engine::extract(&body, tree, 10_000)? };
+                rows.iter()
+                    .map(|r| r.children.values().map(Vec::len).sum::<usize>())
+                    .sum::<usize>()
+                    .max(rows.len())
+            } else {
+                0
+            };
+            let challenge = crate::browser::challenge::detect(&page);
+            let final_url =
+                url::Url::parse(final_url).map_err(|_| BrowserError::Protocol { status: 502 })?;
+            let elapsed = t0.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let outcome = crate::fetcher::FetchOutcome {
+                url: final_url,
+                etag: None,
+                last_modified: None,
+                status: page.status.unwrap_or(200),
+                content_type: page
+                    .content_type
+                    .clone()
+                    .unwrap_or_else(|| "text/html; charset=utf-8".into()),
+                bytes: body.len(),
+                body,
+                latency_ms: elapsed,
+                proxy_id: egress_id.clone(),
+            };
+            Ok::<_, BrowserError>((
+                outcome,
+                challenge,
+                selector_count,
+                workflow.completed_steps,
+                page,
+            ))
+        }
+        .await;
+        let elapsed = t0.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        self.pool.report(proxy_index, result.is_ok(), elapsed);
+        if self.cfg.browser.session_isolation == SessionIsolation::PerJob {
+            let _ = runtime.close_session(&session_key).await;
+        }
+        let (outcome, challenge, selector_count, completed_steps, _page) = result?;
+        Ok(BrowserFetch {
+            outcome,
+            challenge,
+            session_created,
+            selector_count,
+            action_count: completed_steps,
+        })
+    }
+
     fn push(&self, job: Job) {
         // Intake count first: a worker must never conclude "nothing left"
         // while an enqueue is in flight (same ordering contract the bare
@@ -1057,11 +1556,49 @@ impl WorkerCtx {
                     json!({"url": url, "depth": depth, "target": target}),
                 );
             }
-            Err(_) => {
+            Err(PushError::Full) => {
                 self.outstanding.fetch_sub(1, Ordering::SeqCst);
                 self.metrics.queue_rejected();
                 self.runtime
                     .emit(EventKind::QueueOverflow, None, json!({"dropped_url": url}));
+            }
+            Err(PushError::InvalidTarget) => {
+                self.outstanding.fetch_sub(1, Ordering::SeqCst);
+                let message = format!(
+                    "queue rejected job for target index {target}; configured target count is {}",
+                    self.cfg.targets.len()
+                );
+                tracing::error!(
+                    job_target = target,
+                    url = %crate::config::redact_credentials(&url),
+                    %message,
+                    "invalid target index reached the crawl queue"
+                );
+                self.halt.store(true, Ordering::Relaxed);
+                self.fatal_error
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_or_insert(message);
+            }
+        }
+    }
+
+    fn requeue(&self, job: Job) -> Result<()> {
+        self.outstanding.fetch_add(1, Ordering::SeqCst);
+        let (url, depth, target) = (job.url.to_string(), job.depth, job.target);
+        match self.queue.requeue(job) {
+            Ok(id) => {
+                self.runtime.acct.note_submit();
+                self.runtime.emit(
+                    EventKind::JobSubmitted,
+                    Some(id.0),
+                    json!({"url": url, "depth": depth, "target": target, "requeued": true}),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.outstanding.fetch_sub(1, Ordering::SeqCst);
+                anyhow::bail!("could not preserve a cancelled job in the queue: {error:?}");
             }
         }
     }
@@ -1070,6 +1607,10 @@ impl WorkerCtx {
     /// accounting: metric, run snapshot, and the JobCompleted/JobFailed
     /// events all agree because they all come from here.
     fn finish_job(&self, id: JobId, target: usize, url: &str, waited: Duration, res: Result<()>) {
+        if self.job_deferred.swap(false, Ordering::Relaxed) {
+            self.runtime.acct.note_deferred();
+            return;
+        }
         let policy_failed = self.job_failed.swap(false, Ordering::Relaxed);
         let reason = {
             let mut g = self
@@ -1080,7 +1621,11 @@ impl WorkerCtx {
         };
         match (&res, policy_failed) {
             (Err(e), _) => {
-                tracing::warn!(worker = self.worker_id, err = %e, "job failed");
+                tracing::warn!(
+                    worker = self.worker_id,
+                    err = %crate::config::redact_observation_text(&e.to_string()),
+                    "job failed"
+                );
                 self.metrics.job_failed();
                 self.supervisor.note_job_failed(self.worker_id);
                 let why = if reason.is_empty() {
@@ -1175,7 +1720,23 @@ impl WorkerCtx {
     }
 
     async fn process(&self, job: Job) -> Result<()> {
+        let approved = self.cfg.targets.get(job.target).ok_or_else(|| {
+            anyhow::anyhow!(
+                "job target index {} is out of range for {} configured targets",
+                job.target,
+                self.cfg.targets.len()
+            )
+        })?;
         let host = job.url.host_str().unwrap_or_default().to_string();
+        if !crate::config::approved_url(approved, &job.url, job.depth) {
+            self.note_dlq(&job, "scope: URL outside the approved target".into());
+            return Ok(());
+        }
+        if self.global_pages.load(Ordering::SeqCst) >= self.cfg.max_pages
+            || self.per_target_count[job.target].load(Ordering::SeqCst) >= approved.max_pages
+        {
+            return Ok(());
+        }
         if self.politeness.is_abandoned(&host, &self.cfg) {
             if let Some(a) = &self.audit {
                 a.note_abandoned(&host);
@@ -1207,19 +1768,13 @@ impl WorkerCtx {
                 Permit::Allowed => {}
             }
         }
-        let t_wait = Instant::now();
-        self.politeness.wait(&host, &self.cfg, &self.metrics).await;
-        if let Some(a) = &self.audit {
-            a.note_wait(&host, t_wait.elapsed());
-        }
-
         if self.cfg.respect_robots {
             let base = origin(&job.url);
             let robots = self.robots_for(&base).await;
             if let Some(d) = robots.crawl_delay {
                 self.politeness.note_crawl_delay(&host, &self.cfg, d);
             }
-            if !robots.allows(job.url.path()) {
+            if !robots.allows_url(&job.url) {
                 self.metrics.robot_denied();
                 if let Some(a) = &self.audit {
                     a.note_robots_denial(&host);
@@ -1230,12 +1785,61 @@ impl WorkerCtx {
                         .unwrap()
                         .insert(job.url.to_string(), "robots-denied".into());
                 }
-                tracing::debug!(url = %job.url, "denied by robots.txt");
+                tracing::debug!(url = %crate::config::redact_credentials(job.url.as_str()), "denied by robots.txt");
                 self.breaker_release(&breaker, took_probe);
                 return Ok(());
             }
         }
 
+        if self.politeness.is_abandoned(&host, &self.cfg) {
+            self.breaker_release(&breaker, took_probe);
+            return Ok(());
+        }
+        let t_wait = Instant::now();
+        if !self
+            .politeness
+            .wait_stoppable(
+                &host,
+                &self.cfg,
+                &self.metrics,
+                self.stop.as_deref(),
+                &self.halt,
+            )
+            .await
+        {
+            self.breaker_release(&breaker, took_probe);
+            self.requeue(job)?; // the checkpoint retains not-yet-fetched work
+            self.job_deferred.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        if let Some(a) = &self.audit {
+            a.note_wait(&host, t_wait.elapsed());
+        }
+
+        // Hard page admission BEFORE the request. Queuing 1000 links can
+        // never turn a max_pages=3 run into 1001 requests under fanout.
+        let target_counter = &self.per_target_count[job.target];
+        let target_cap = self.cfg.targets[job.target].max_pages;
+        if target_counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < target_cap).then(|| n + 1)
+            })
+            .is_err()
+        {
+            self.breaker_release(&breaker, took_probe);
+            return Ok(());
+        }
+        if self
+            .global_pages
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < self.cfg.max_pages).then(|| n + 1)
+            })
+            .is_err()
+        {
+            target_counter.fetch_sub(1, Ordering::SeqCst);
+            self.breaker_release(&breaker, took_probe);
+            return Ok(());
+        }
         let rkey = dedup_key(&job.url);
         let hdrs = match self.reval.as_ref().map(|s| s.condition_for(&rkey)) {
             Some(crate::reval::Condition::Headers(h)) => h,
@@ -1258,7 +1862,111 @@ impl WorkerCtx {
             budget: self.retry_budget.clone(),
         };
         let t_fetch = Instant::now();
-        let fetch = self.fetcher.execute(plan, &rctx, &self.metrics).await;
+        let fetch = if approved.browser.enabled {
+            #[cfg(feature = "browser")]
+            {
+                self.metrics.request_started();
+                self.runtime.emit(EventKind::RequestStarted, Some(job.id.0), json!({"url":crate::config::redact_credentials(job.url.as_str()),"transport":"browser","target":approved.id}));
+                match self.fetch_browser(&job, approved).await {
+                    Ok(browser_fetch) => {
+                        let elapsed = t_fetch.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        let status = browser_fetch.outcome.status;
+                        let meta = ExecutionMeta {
+                            correlation_id: job.id.0,
+                            attempts: 1,
+                            total_ms: elapsed,
+                            last_attempt_ms: elapsed,
+                            bytes: browser_fetch.outcome.bytes as u64,
+                            status,
+                            egress: browser_fetch.outcome.proxy_id.clone(),
+                            backoff_ms: 0,
+                            deadline_hit: false,
+                        };
+                        self.runtime.acct.note_bytes(meta.bytes);
+                        self.runtime.emit(EventKind::RequestFinished,Some(job.id.0),json!({"status":status,"bytes":meta.bytes,"egress":meta.egress,"transport":"browser"}));
+                        if matches!(status, 401 | 403 | 429 | 451) {
+                            Err((
+                                FetchError::Blocked {
+                                    status,
+                                    retry_after: None,
+                                },
+                                meta,
+                            ))
+                        } else if browser_fetch.challenge.detected {
+                            self.metrics.request_blocked();
+                            self.metrics.browser_challenge_detected();
+                            self.bump(job.target, |t| t.blocked += 1);
+                            self.note_dlq(
+                                &job,
+                                format!("browser-challenge:{:?}", browser_fetch.challenge.kind),
+                            );
+                            self.breaker_note(&breaker, true, &host);
+                            self.runtime.emit(EventKind::BrowserChallengeDetected,Some(job.id.0),json!({"target":approved.id,"kind":browser_fetch.challenge.kind,"confidence":browser_fetch.challenge.confidence,"evidence":browser_fetch.challenge.evidence,"url":crate::config::redact_credentials(job.url.as_str()),"decision":"stop"}));
+                            if let Some(a) = &self.audit {
+                                a.note_request(&host, status);
+                            }
+                            return Ok(());
+                        } else {
+                            self.metrics.request_ok();
+                            self.metrics.page_fetched();
+                            for _ in 0..browser_fetch.action_count {
+                                self.metrics.browser_action_completed();
+                            }
+                            if browser_fetch.session_created {
+                                self.metrics.browser_session_created();
+                                self.runtime.emit(EventKind::BrowserSessionCreated,Some(job.id.0),json!({"target":approved.id,"egress":meta.egress,"worker":self.worker_id}));
+                            }
+                            if browser_fetch.selector_count > 0 {
+                                self.metrics
+                                    .selector_records_previewed(browser_fetch.selector_count);
+                                self.runtime.emit(EventKind::SelectorPreviewCompleted,Some(job.id.0),json!({"target":approved.id,"records":browser_fetch.selector_count}));
+                            }
+                            Ok((browser_fetch.outcome, meta))
+                        }
+                    }
+                    Err(error) => {
+                        let elapsed = t_fetch.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        let message = error.to_string();
+                        self.runtime.emit(EventKind::RequestFinished,Some(job.id.0),json!({"status":0,"transport":"browser","error":crate::browser::error::safe_message(&message)}));
+                        let failure = match &error {
+                            crate::browser::error::BrowserError::Policy(_)
+                            | crate::browser::error::BrowserError::InvalidInput(_)
+                            | crate::browser::error::BrowserError::ContentLimit { .. }
+                            | crate::browser::error::BrowserError::Unsupported(_)
+                            | crate::browser::error::BrowserError::Config(_) => {
+                                FetchError::Permanent(message)
+                            }
+                            _ => FetchError::Failed(message),
+                        };
+                        Err((
+                            failure,
+                            ExecutionMeta {
+                                correlation_id: job.id.0,
+                                attempts: 1,
+                                total_ms: elapsed,
+                                last_attempt_ms: elapsed,
+                                bytes: 0,
+                                status: 0,
+                                egress: "browser".into(),
+                                backoff_ms: 0,
+                                deadline_hit: false,
+                            },
+                        ))
+                    }
+                }
+            }
+            #[cfg(not(feature = "browser"))]
+            {
+                Err((
+                    FetchError::Permanent(
+                        "browser target requires a binary built with --features browser".into(),
+                    ),
+                    ExecutionMeta::default(),
+                ))
+            }
+        } else {
+            self.fetcher.execute(plan, &rctx, &self.metrics).await
+        };
         self.metrics
             .note_request_ms(t_fetch.elapsed().as_millis() as u64);
         let outcome = match fetch {
@@ -1320,7 +2028,7 @@ impl WorkerCtx {
                     a.note_backoff(&host, back.as_millis() as u64);
                 }
                 tracing::warn!(
-                    url = %job.url,
+                    url = %crate::config::redact_credentials(job.url.as_str()),
                     status,
                     backoff_s = back.as_secs(),
                     "access refused; honoring it (no spoofing, no evasion rotation)"
@@ -1338,6 +2046,20 @@ impl WorkerCtx {
                 return Ok(());
             }
             Err((FetchError::Permanent(msg), _meta)) => {
+                if msg == "request cancelled"
+                    && self
+                        .stop
+                        .as_ref()
+                        .is_some_and(|stop| stop.load(Ordering::Relaxed))
+                {
+                    // Operator cancellation is not an upstream failure. Keep
+                    // the admitted job pending for checkpoint/recovery instead
+                    // of counting or persisting it as a permanent DLQ entry.
+                    self.breaker_release(&breaker, took_probe);
+                    self.requeue(job)?;
+                    self.job_deferred.store(true, Ordering::Relaxed);
+                    return Ok(());
+                }
                 // Local cap (body size / bad proxy url): the upstream never
                 // misbehaved, so the breaker stays uninvolved.
                 self.breaker_note(&breaker, true, &host);
@@ -1352,16 +2074,26 @@ impl WorkerCtx {
 
         let is_text =
             outcome.content_type.contains("html") || outcome.content_type.starts_with("text/");
-        let is_json = matches!(self.extractors[job.target], ExtractMode::Json(_))
-            && outcome.content_type.contains("json");
+        let is_json = matches!(
+            self.extractors[job.target],
+            ExtractMode::Json(_) | ExtractMode::TreeJson
+        ) && outcome.content_type.contains("json");
         if !is_text && !is_json {
-            tracing::debug!(url = %job.url, ct = %outcome.content_type, "skipping non-text document");
+            tracing::debug!(url = %crate::config::redact_credentials(job.url.as_str()), ct = %outcome.content_type, "skipping non-text document");
             return Ok(());
         }
 
         // Typed fingerprint: the dedupe set stores validated ids, so a
         // corrupted hash can never silently split an entry in two.
-        let fp = crate::ids::RecordId::parse(&extract::fingerprint(&outcome.body))
+        if !is_json {
+            extract::guard_html(&outcome.body)?;
+        }
+        let body_fp = if is_json {
+            extract::fingerprint_json(&outcome.body)?
+        } else {
+            extract::fingerprint(&outcome.body)
+        };
+        let fp = crate::ids::RecordId::parse(&body_fp)
             .expect("fingerprint is a sha256 hex digest by construction");
         if !self.seen_fp.lock().unwrap_or_else(|p| p.into_inner())[job.target].insert(fp.clone()) {
             self.metrics.record_deduped();
@@ -1378,14 +2110,14 @@ impl WorkerCtx {
             let mut fields = match &self.extractors[job.target] {
                 ExtractMode::Json(jx) => {
                     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&outcome.body) else {
-                        tracing::warn!(url = %job.url, "json-mode body is not valid JSON; record skipped");
+                        tracing::warn!(url = %crate::config::redact_credentials(job.url.as_str()), "json-mode body is not valid JSON; record skipped");
                         return Ok(());
                     };
-                    jx.extract(&doc)
+                    jx.extract_bounded(&doc)?
                 }
                 ExtractMode::Html(ex) => {
                     let doc = Html::parse_document(&outcome.body);
-                    let f = ex.extract(&doc);
+                    let f = ex.extract_bounded(&doc)?;
                     if want_discover {
                         let sel: Selector = tcfg
                             .link_selector
@@ -1394,9 +2126,48 @@ impl WorkerCtx {
                             .unwrap_or_else(|| {
                                 Selector::parse("a[href]").expect("validated at startup")
                             });
-                        hrefs = extract::links(&doc, &sel);
+                        hrefs = extract::links_bounded(
+                            &doc,
+                            &sel,
+                            self.cfg.max_pages.min(tcfg.max_pages),
+                        );
                     }
                     f
+                }
+                ExtractMode::TreeHtml => {
+                    let tree = tcfg
+                        .selector_tree
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("validated selector tree disappeared"))?;
+                    let rows = crate::selector::engine::extract(&outcome.body, tree, 10_000)?;
+                    if want_discover {
+                        let doc = Html::parse_document(&outcome.body);
+                        let sel: Selector = tcfg
+                            .link_selector
+                            .as_deref()
+                            .and_then(|s| Selector::parse(s).ok())
+                            .unwrap_or_else(|| {
+                                Selector::parse("a[href]").expect("validated at startup")
+                            });
+                        hrefs = extract::links_bounded(
+                            &doc,
+                            &sel,
+                            self.cfg.max_pages.min(tcfg.max_pages),
+                        );
+                    }
+                    rows.first()
+                        .map(|r| r.to_value().as_object().cloned().unwrap_or_default())
+                        .unwrap_or_default()
+                }
+                ExtractMode::TreeJson => {
+                    let tree = tcfg
+                        .selector_tree
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("validated selector tree disappeared"))?;
+                    let rows = crate::selector::engine::extract_json(&outcome.body, tree, 10_000)?;
+                    rows.first()
+                        .map(|r| r.to_value().as_object().cloned().unwrap_or_default())
+                        .unwrap_or_default()
                 }
             };
             // Transform pipeline, then declared-schema enforcement, on the
@@ -1404,7 +2175,8 @@ impl WorkerCtx {
             // branch; records that quarantine never reach the sink, but
             // their links are still discovered — the page was fetched
             // legitimately and its graph edges are sound data.
-            let po = self.pipelines[job.target].apply(&mut fields, job.url.as_str(), job.depth)?;
+            let po =
+                self.pipelines[job.target].apply(&mut fields, outcome.url.as_str(), job.depth)?;
             for _ in 0..po.drift {
                 self.metrics.schema_drift();
             }
@@ -1415,7 +2187,7 @@ impl WorkerCtx {
             let rec = Record {
                 run: self.cfg.name.clone(),
                 target: self.cfg.targets[job.target].id.clone(),
-                url: job.url.to_string(),
+                url: crate::config::redact_credentials(outcome.url.as_str()),
                 depth: job.depth,
                 ts: now_secs(),
                 fingerprint: fp.as_str().to_string(),
@@ -1439,7 +2211,7 @@ impl WorkerCtx {
         if let Some(reasons) = &quarantined {
             self.metrics.record_quarantined();
             tracing::warn!(
-                url = %job.url,
+                url = %crate::config::redact_credentials(job.url.as_str()),
                 target = %rec.target,
                 "record quarantined by schema enforcement: {}",
                 reasons.join("; ")
@@ -1476,9 +2248,7 @@ impl WorkerCtx {
                         "written": self.record_cap.used(),
                     }),
                 );
-                if let Some(s) = &self.stop {
-                    s.store(true, Ordering::Relaxed);
-                }
+                self.halt.store(true, Ordering::Relaxed);
             }
         } else {
             let t_write = Instant::now();
@@ -1507,8 +2277,7 @@ impl WorkerCtx {
                 .insert(job.url.to_string());
         }
 
-        let n = self.global_pages.fetch_add(1, Ordering::SeqCst) + 1;
-        self.per_target_count[job.target].fetch_add(1, Ordering::SeqCst);
+        let n = self.global_pages.load(Ordering::SeqCst);
         if let Some(c) = &self.ckpt {
             c.pages_since.fetch_add(1, Ordering::SeqCst);
             c.tick(false);
@@ -1519,7 +2288,8 @@ impl WorkerCtx {
         let cands: Vec<Url> = if want_discover {
             hrefs
                 .into_iter()
-                .filter_map(|href| job.url.join(href.trim()).ok())
+                .filter(|href| href.len() <= 8192)
+                .filter_map(|href| outcome.url.join(href.trim()).ok())
                 .filter(|abs| {
                     abs.scheme() == job.url.scheme()
                         && abs.host_str() == job.url.host_str()
@@ -1534,6 +2304,7 @@ impl WorkerCtx {
                             .iter()
                             .any(|p| abs.as_str().contains(p.as_str()))
                 })
+                .take(self.cfg.max_pages.min(tcfg.max_pages))
                 .collect()
         } else {
             Vec::new()
@@ -1565,6 +2336,21 @@ impl WorkerCtx {
 
     async fn discover_links(&self, cands: Vec<Url>, job: &Job) {
         for abs in cands {
+            if self
+                .global_pages
+                .load(Ordering::SeqCst)
+                .saturating_add(self.queue.len())
+                >= self.cfg.max_pages
+                || self.per_target_count[job.target]
+                    .load(Ordering::SeqCst)
+                    .saturating_add(self.queued_for(job.target))
+                    >= self.cfg.targets[job.target].max_pages
+            {
+                break;
+            }
+            if !crate::config::approved_url(&self.cfg.targets[job.target], &abs, job.depth + 1) {
+                continue;
+            }
             if !self.visited.lock().unwrap_or_else(|p| p.into_inner())[job.target]
                 .insert(dedup_key(&abs))
             {
@@ -1572,7 +2358,7 @@ impl WorkerCtx {
             }
             if self.cfg.respect_robots {
                 let robots = self.robots_for(&origin(&abs)).await;
-                if !robots.allows(abs.path()) {
+                if !robots.allows_url(&abs) {
                     self.metrics.robot_denied();
                     if let Some(a) = &self.audit {
                         a.note_robots_denial(job.url.host_str().unwrap_or_default());
@@ -1589,7 +2375,22 @@ impl WorkerCtx {
     /// policy may have changed even if the page didn't).
     async fn replay_links(&self, urls: Vec<String>, job: &Job) {
         for u in urls {
+            if self
+                .global_pages
+                .load(Ordering::SeqCst)
+                .saturating_add(self.queue.len())
+                >= self.cfg.max_pages
+                || self.per_target_count[job.target]
+                    .load(Ordering::SeqCst)
+                    .saturating_add(self.queued_for(job.target))
+                    >= self.cfg.targets[job.target].max_pages
+            {
+                break;
+            }
             let Ok(abs) = Url::parse(&u) else { continue };
+            if !crate::config::approved_url(&self.cfg.targets[job.target], &abs, job.depth + 1) {
+                continue;
+            }
             if !self.visited.lock().unwrap_or_else(|p| p.into_inner())[job.target]
                 .insert(dedup_key(&abs))
             {
@@ -1597,7 +2398,7 @@ impl WorkerCtx {
             }
             if self.cfg.respect_robots {
                 let robots = self.robots_for(&origin(&abs)).await;
-                if !robots.allows(abs.path()) {
+                if !robots.allows_url(&abs) {
                     self.metrics.robot_denied();
                     if let Some(a) = &self.audit {
                         a.note_robots_denial(job.url.host_str().unwrap_or_default());
@@ -1623,7 +2424,14 @@ impl WorkerCtx {
     }
 
     fn bump(&self, target: usize, f: impl FnOnce(&mut TargetSummary)) {
-        let id = self.cfg.targets[target].id.clone();
+        let Some(id) = self.cfg.targets.get(target).map(|t| t.id.clone()) else {
+            tracing::error!(
+                job_target = target,
+                configured_targets = self.cfg.targets.len(),
+                "cannot update per-target summary for an invalid target index"
+            );
+            return;
+        };
         let mut g = self.per_target.lock().unwrap_or_else(|p| p.into_inner());
         f(g.entry(id).or_default());
     }
@@ -1635,13 +2443,19 @@ impl WorkerCtx {
             a.note_error(job.url.host_str().unwrap_or_default());
         }
         self.bump(job.target, |t| t.failed += 1);
-        self.note_dlq(job, format!("failed:{msg}"));
-        tracing::warn!(url = %job.url, msg, "request failed after retries");
+        let safe_message = crate::config::redact_observation_text(msg);
+        self.note_dlq(job, format!("failed:{safe_message}"));
+        tracing::warn!(
+            url = %crate::config::redact_credentials(job.url.as_str()),
+            msg = %safe_message,
+            "request failed after retries"
+        );
     }
 
     fn note_dlq(&self, job: &Job, reason: String) {
         // The failure signal for lifecycle accounting is recorded even when
         // no DLQ file is configured; only the persistence is gated.
+        let reason = crate::config::redact_observation_text(&reason);
         self.job_failed.store(true, Ordering::Relaxed);
         *self
             .job_fail_reason

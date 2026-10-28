@@ -15,7 +15,7 @@ describe("connect probe (§3)", () => {
         jsonResponse({ error: { code: "unauthorized", message: "bearer token required for non-loopback bind" } }, 401),
       ) as unknown as typeof fetch,
     );
-    const bad = await probeHealth("/api", "tok");
+    const bad = await probeHealth("/api", "unit-test-secret");
     expect(bad.ok).toBe(false);
     expect(bad.error?.kind).toBe("unauthorized");
     expect(bad.error?.message).toContain("bearer token required");

@@ -73,9 +73,50 @@ pub struct CommandId(pub String);
 
 static CMD_SEQ: AtomicU64 = AtomicU64::new(1);
 
+fn identity_namespace() -> Result<&'static str, ControlError> {
+    static NAMESPACE: std::sync::OnceLock<Result<String, ()>> = std::sync::OnceLock::new();
+    match NAMESPACE.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| ())?;
+        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }) {
+        Ok(namespace) => Ok(namespace.as_str()),
+        Err(()) => Err(ControlError::unavailable(
+            "operating-system randomness is unavailable; no identity was issued",
+        )),
+    }
+}
+
+fn mint_identity(prefix: &str, seq: &AtomicU64) -> Result<String, ControlError> {
+    let namespace = identity_namespace()?;
+    let n = seq
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .map_err(|_| ControlError::unavailable("identity sequence exhausted"))?;
+    Ok(format!("{prefix}-{namespace}-{n}"))
+}
+
+fn valid_identity_tail(tail: &str) -> bool {
+    if let Some((namespace, counter)) = tail.split_once('-') {
+        namespace.len() == 32
+            && namespace
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && !counter.is_empty()
+            && counter.len() <= 20
+            && counter.parse::<u64>().is_ok_and(|n| n > 0)
+    } else {
+        // Previously issued numeric ids remain parseable; only new ids
+        // include the random process namespace, so restarts cannot alias.
+        !tail.is_empty() && tail.len() <= 20 && tail.bytes().all(|b| b.is_ascii_digit())
+    }
+}
+
 impl CommandId {
     pub fn next() -> Self {
-        CommandId(format!("cmd-{}", CMD_SEQ.fetch_add(1, Ordering::Relaxed)))
+        Self::try_next().expect("OS randomness required for command identity")
+    }
+    pub fn try_next() -> Result<Self, ControlError> {
+        mint_identity("cmd", &CMD_SEQ).map(CommandId)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -98,7 +139,10 @@ static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
 
 impl ControlJobId {
     pub fn next() -> Self {
-        ControlJobId(format!("job-{}", JOB_SEQ.fetch_add(1, Ordering::Relaxed)))
+        Self::try_next().expect("OS randomness required for job identity")
+    }
+    pub fn try_next() -> Result<Self, ControlError> {
+        mint_identity("job", &JOB_SEQ).map(ControlJobId)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -108,7 +152,7 @@ impl ControlJobId {
     /// payload into a lookup.
     pub fn parse(s: &str) -> Option<Self> {
         let rest = s.strip_prefix("job-")?;
-        if rest.is_empty() || rest.len() > 20 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        if !valid_identity_tail(rest) {
             return None;
         }
         Some(ControlJobId(s.to_string()))
@@ -129,14 +173,17 @@ static ART_SEQ: AtomicU64 = AtomicU64::new(1);
 
 impl ArtifactId {
     pub fn next() -> Self {
-        ArtifactId(format!("art-{}", ART_SEQ.fetch_add(1, Ordering::Relaxed)))
+        Self::try_next().expect("OS randomness required for artifact identity")
+    }
+    pub fn try_next() -> Result<Self, ControlError> {
+        mint_identity("art", &ART_SEQ).map(ArtifactId)
     }
     pub fn as_str(&self) -> &str {
         &self.0
     }
     pub fn parse(s: &str) -> Option<Self> {
         let rest = s.strip_prefix("art-")?;
-        if rest.is_empty() || rest.len() > 20 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        if !valid_identity_tail(rest) {
             return None;
         }
         Some(ArtifactId(s.to_string()))
@@ -571,13 +618,25 @@ impl CommandSpec {
                                 record_limit: match o.get("record_limit") {
                                     None => 100,
                                     Some(v) => {
-                                        usize_of(v, "source.record_limit")?.min(MAX_AI_FIELDS)
+                                        let n = usize_of(v, "source.record_limit")?;
+                                        if n == 0 {
+                                            return Err(ControlError::invalid(
+                                                "source.record_limit must be at least 1",
+                                            ));
+                                        }
+                                        n.min(MAX_AI_FIELDS)
                                     }
                                 },
                                 field_limit: match o.get("field_limit") {
                                     None => 32,
                                     Some(v) => {
-                                        usize_of(v, "source.field_limit")?.min(MAX_AI_FIELDS)
+                                        let n = usize_of(v, "source.field_limit")?;
+                                        if n == 0 {
+                                            return Err(ControlError::invalid(
+                                                "source.field_limit must be at least 1",
+                                            ));
+                                        }
+                                        n.min(MAX_AI_FIELDS)
                                     }
                                 },
                             },
@@ -729,7 +788,7 @@ impl ControlCommand {
         }
         limits.validate()?;
         Ok(Self {
-            id: CommandId::next(),
+            id: CommandId::try_next()?,
             corr: corr.to_string(),
             actor: actor.to_string(),
             spec,

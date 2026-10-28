@@ -48,6 +48,90 @@ fn mk_job_applies_age_policy_at_the_single_construction_point() {
 }
 
 #[test]
+fn dlq_serialization_redacts_credentials_and_secret_tails() {
+    let secret_url = "https://alice:long-password@example.test/private/path?token=secret-token";
+    let entry = safe_dlq_entry(
+        &Config::default(),
+        secret_url,
+        serde_json::json!({
+            "url": secret_url,
+            "reason": "failed request to https://alice:long-password@example.test/private/path?token=secret-token"
+        }),
+    );
+    let text = entry.to_string();
+    assert_eq!(entry["url"], "https://example.test");
+    assert_eq!(entry["retryable"], false);
+    assert!(!text.contains("alice"));
+    assert!(!text.contains("long-password"));
+    assert!(!text.contains("private/path"));
+    assert!(!text.contains("secret-token"));
+}
+
+#[test]
+fn dlq_retry_resolves_target_identity_and_legacy_queue_prefix_safely() {
+    let cfg = Config {
+        targets: vec![
+            crate::config::TargetCfg {
+                id: "catalog".into(),
+                start_url: "https://example.test/shop/".into(),
+                ..Default::default()
+            },
+            crate::config::TargetCfg {
+                id: "news".into(),
+                start_url: "https://news.test/".into(),
+                ..Default::default()
+            },
+        ],
+        ..Config::default()
+    };
+    let approved = Url::parse("https://example.test/shop/item").unwrap();
+    assert_eq!(
+        target_index_for_dlq(&cfg, &serde_json::json!({"target":"catalog"}), &approved),
+        Some(0)
+    );
+    // Distributed entries from older workers stored the Redis prefix here.
+    assert_eq!(
+        target_index_for_dlq(&cfg, &serde_json::json!({"target":"crawl:demo"}), &approved),
+        Some(0)
+    );
+    assert_eq!(
+        target_index_for_dlq(&cfg, &serde_json::json!({}), &approved),
+        Some(0)
+    );
+    let outside = Url::parse("https://attacker.test/private").unwrap();
+    assert_eq!(
+        target_index_for_dlq(&cfg, &serde_json::json!({"target":"crawl:demo"}), &outside),
+        None
+    );
+}
+
+#[test]
+fn dlq_serialization_keeps_safe_urls_retryable() {
+    let safe_url = "https://example.test/path?page=2";
+    let entry = safe_dlq_entry(
+        &Config::default(),
+        safe_url,
+        serde_json::json!({"url": safe_url, "reason": "failed: timeout", "attempts": 1}),
+    );
+    assert_eq!(entry["url"], safe_url);
+    assert!(entry.get("retryable").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn dlq_reader_refuses_symlinked_files() {
+    let dir = std::env::temp_dir().join(format!("harvest-dlq-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let victim = dir.join("victim");
+    let link = dir.join("dlq.jsonl");
+    std::fs::write(&victim, b"private data").unwrap();
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    assert!(read_dlq(&link).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn summary_serializes_pipeline_counters_for_history() {
     let s = Summary {
         pages_fetched: 1,

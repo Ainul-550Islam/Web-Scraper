@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./app/App";
+import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ThemeProvider } from "./hooks/useTheme";
 import { ToastProvider } from "./hooks/useToasts";
 import { ConnectionProvider } from "./lib/connection";
@@ -31,6 +32,7 @@ if (import.meta.env.DEV && import.meta.env.VITE_MOCK === "1") {
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
+    <PageErrorBoundary>
     <ThemeProvider>
       <ToastProvider>
         <ConnectionProvider>
@@ -38,5 +40,6 @@ createRoot(document.getElementById("root") as HTMLElement).render(
         </ConnectionProvider>
       </ToastProvider>
     </ThemeProvider>
+    </PageErrorBoundary>
   </StrictMode>,
 );

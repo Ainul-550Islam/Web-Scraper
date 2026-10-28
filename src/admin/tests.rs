@@ -25,7 +25,7 @@ async fn request(path: &str, state: &Arc<AdminState>) -> String {
         handle(&mut server, &st).await
     });
     client
-        .write_all(format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n").as_bytes())
+        .write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
         .await
         .unwrap();
     let mut buf = Vec::new();
@@ -138,7 +138,9 @@ async fn bearer_auth_gates_all_endpoints() {
         handle(&mut s, &st2).await
     });
     client
-        .write_all(b"GET /metrics HTTP/1.1\r\nhost: x\r\nauthorization: Bearer nope\r\n\r\n")
+        .write_all(
+            b"GET /metrics HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer nope\r\n\r\n",
+        )
         .await
         .unwrap();
     let mut out = Vec::new();
@@ -155,7 +157,7 @@ async fn bearer_auth_gates_all_endpoints() {
     });
     client
         .write_all(
-            b"GET /metrics HTTP/1.1\r\nhost: x\r\nauthorization: Bearer sekrit-token\r\n\r\n",
+            b"GET /metrics HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer sekrit-token\r\n\r\n",
         )
         .await
         .unwrap();
@@ -237,7 +239,7 @@ async fn correlation_ids_echo_or_generate() {
     let st = test_state(PathBuf::from("/nonexistent.jsonl"));
     let r = request_full(
         &st,
-        b"GET /health HTTP/1.1\r\nhost: x\r\nx-request-id: job-7.trace\r\n\r\n",
+        b"GET /health HTTP/1.1\r\nhost: localhost\r\nx-request-id: job-7.trace\r\n\r\n",
     )
     .await;
     assert!(
@@ -269,7 +271,7 @@ async fn response_safety_headers_everywhere() {
     let st = test_state_tok(PathBuf::from("/nope.jsonl"), Some("tok".into()));
     let r = request_full(
         &st,
-        b"GET /stats HTTP/1.1\r\nhost: x\r\nauthorization: Bearer tok\r\n\r\n",
+        b"GET /stats HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer tok\r\n\r\n",
     )
     .await;
     for hdr in [
@@ -284,7 +286,7 @@ async fn response_safety_headers_everywhere() {
     // dashboard gets a CSP locking itself to same-origin fetches
     let d = request_full(
         &st,
-        b"GET / HTTP/1.1\r\nhost: x\r\nauthorization: Bearer tok\r\n\r\n",
+        b"GET / HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer tok\r\n\r\n",
     )
     .await;
     assert!(
@@ -297,7 +299,7 @@ async fn response_safety_headers_everywhere() {
     assert!(m.contains("malformed request line"));
     // query strings over the bound are rejected (400), not processed
     let big = format!(
-        "GET /stats?{} HTTP/1.1\r\nhost: x\r\nauthorization: Bearer tok\r\n\r\n",
+        "GET /stats?{} HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer tok\r\n\r\n",
         "a=1&".repeat(100)
     );
     let r = request_full(&st, big.as_bytes()).await;
@@ -308,24 +310,47 @@ async fn response_safety_headers_everywhere() {
 async fn method_routing_is_read_mostly() {
     let st = test_state(PathBuf::from("/nope.jsonl"));
     // non-GET on a read route: 405 with the stable JSON error shape
-    let r = request_full(&st, b"DELETE /stats HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let r = request_full(&st, b"DELETE /stats HTTP/1.1\r\nhost: localhost\r\n\r\n").await;
     assert!(r.starts_with("HTTP/1.1 405 Method Not Allowed"), "{r}");
     assert!(r.contains("\"code\":\"method_not_allowed\""));
-    // POST to a GET route: also 405 (mutating set is exactly two paths)
+    // The 405 text describes this method and route, not a stale mutation list.
+    assert!(r.contains("DELETE is not supported on /stats."));
+    // POST to a GET route is also 405: mutations are limited to explicit POST routes.
     let r = request_full(
         &st,
-        b"POST /stats HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\n\r\n",
+        b"POST /stats HTTP/1.1\r\nhost: localhost\r\ncontent-length: 0\r\n\r\n",
     )
     .await;
     assert!(r.starts_with("HTTP/1.1 405"), "{r}");
     // body over the hard cap: 413 before the body is read
     let r = request_full(
         &st,
-        b"POST /ops/note HTTP/1.1\r\nhost: x\r\ncontent-length: 99999\r\n\r\n",
+        b"POST /ops/note HTTP/1.1\r\nhost: localhost\r\ncontent-length: 99999\r\n\r\n",
     )
     .await;
     assert!(r.starts_with("HTTP/1.1 413 Payload Too Large"), "{r}");
     assert!(r.contains("\"payload_too_large\""));
+}
+
+#[test]
+fn artifact_download_gate_covers_the_registered_download_route() {
+    let st = test_state(PathBuf::from("/nope.jsonl"));
+    assert_eq!(route_shape("/artifacts/art-1"), "/artifacts/:id");
+
+    let first = acquire_download_slot(&st, route_shape("/artifacts/art-1"))
+        .unwrap()
+        .expect("first download slot");
+    let second = acquire_download_slot(&st, route_shape("/artifacts/art-2"))
+        .unwrap()
+        .expect("second download slot");
+    assert!(acquire_download_slot(&st, "/artifacts/:id").is_err());
+    assert!(acquire_download_slot(&st, "/control/artifacts/:id")
+        .unwrap()
+        .is_none());
+
+    drop(first);
+    assert!(acquire_download_slot(&st, "/artifacts/:id").is_ok());
+    drop(second);
 }
 
 #[tokio::test]
@@ -347,14 +372,14 @@ async fn ops_note_alert_ack_and_audit_flow() {
     // note an operator event
     let r = request_full(
         &st,
-        b"POST /ops/note HTTP/1.1\r\nhost: x\r\ncontent-length: 21\r\n\r\n{\"note\":\"restart ok\"}",
+        b"POST /ops/note HTTP/1.1\r\nhost: localhost\r\ncontent-length: 21\r\n\r\n{\"note\":\"restart ok\"}",
     )
     .await;
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
     // ack the live event (POST-only mutating route)
     let r = request_full(
         &st,
-        b"POST /alerts/ack?event=run_error HTTP/1.1\r\nhost: x\r\n\r\n",
+        b"POST /alerts/ack?event=run_error HTTP/1.1\r\nhost: localhost\r\n\r\n",
     )
     .await;
     assert!(r.contains("\"acked\":1"), "{r}");
@@ -375,7 +400,7 @@ async fn ops_note_alert_ack_and_audit_flow() {
     // acking something unknown reports honestly, still 200
     let r = request_full(
         &st,
-        b"POST /alerts/ack?event=not_a_real_event HTTP/1.1\r\nhost: x\r\n\r\n",
+        b"POST /alerts/ack?event=not_a_real_event HTTP/1.1\r\nhost: localhost\r\n\r\n",
     )
     .await;
     assert!(r.contains("\"result\":\"no-live-entry\""), "{r}");
@@ -519,12 +544,16 @@ async fn diagnostics_and_pool_views_are_honest_when_idle() {
     );
     // /live and /health stay auth-exempt AND constant
     let st2 = test_state_tok(PathBuf::from("/nope.jsonl"), Some("tok".into()));
-    let l = request_full(&st2, b"GET /live HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let l = request_full(&st2, b"GET /live HTTP/1.1\r\nhost: localhost\r\n\r\n").await;
     assert!(
         l.starts_with("HTTP/1.1 200") && l.ends_with("{\"live\":true}"),
         "{l}"
     );
-    let d = request_full(&st2, b"GET /diagnostics HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let d = request_full(
+        &st2,
+        b"GET /diagnostics HTTP/1.1\r\nhost: localhost\r\n\r\n",
+    )
+    .await;
     assert!(
         d.starts_with("HTTP/1.1 401"),
         "diagnostics must NOT be exempt"
@@ -539,4 +568,46 @@ fn metrics_swap_shown_in_snapshot() {
     newm.record_written();
     st.set_metrics(newm);
     assert!(st.metrics().display_json()["records_written"] == 2);
+}
+
+#[tokio::test]
+async fn audit_body_bytes_cannot_supply_an_authorization_header() {
+    let st = test_state_tok(
+        PathBuf::from("/no-history.jsonl"),
+        Some("audit-secret-token".into()),
+    );
+    let r = request_full(&st, b"GET /stats HTTP/1.1\r\nhost: localhost\r\n\r\nAuthorization: Bearer audit-secret-token\r\n").await;
+    assert!(r.starts_with("HTTP/1.1 401"), "a body is not a header: {r}");
+}
+
+#[tokio::test]
+async fn audit_incomplete_headers_are_refused() {
+    let st = test_state(PathBuf::from("/no-history.jsonl"));
+    let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+    let st2 = st.clone();
+    let h = tokio::spawn(async move { handle(&mut server, &st2).await });
+    client
+        .write_all(b"GET /stats HTTP/1.1\r\nhost: localhost\r\n")
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+    let mut out = Vec::new();
+    client.read_to_end(&mut out).await.unwrap();
+    h.await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 400"));
+}
+
+#[tokio::test]
+async fn audit_truncated_bodies_never_commit_a_mutation() {
+    let st = test_state(PathBuf::from("/no-history.jsonl"));
+    let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+    let st2 = st.clone();
+    let h = tokio::spawn(async move { handle(&mut server, &st2).await });
+    client.write_all(b"POST /ops/note HTTP/1.1\r\nhost: localhost\r\ncontent-length: 100\r\n\r\n{\"note\":\"must not commit\"}").await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut out = Vec::new();
+    client.read_to_end(&mut out).await.unwrap();
+    h.await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 400"));
+    assert!(!request("/ops", &st).await.contains("must not commit"));
 }

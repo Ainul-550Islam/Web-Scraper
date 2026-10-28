@@ -268,7 +268,7 @@ fn production_audit_flags_the_soft_risks_only() {
     assert!(w.iter().any(|x| x.contains("pace")));
     assert!(w.iter().any(|x| x.contains("max_retries")));
     assert!(w.iter().any(|x| x.contains("concurrency")));
-    assert!(w.iter().any(|x| x.contains("64 MiB")));
+    assert!(w.iter().any(|x| x.contains("effective workers reserves")));
 }
 
 fn tempdir_like(tag: &str) -> std::path::PathBuf {
@@ -282,7 +282,11 @@ fn tempdir_like(tag: &str) -> std::path::PathBuf {
 fn credential_redaction_covers_parsable_and_opaque_forms() {
     assert_eq!(
         redact_credentials("http://collector:s3cr3t@proxy.corp:8080/exit10"),
-        "http://collector:***@proxy.corp:8080"
+        "http://proxy.corp:8080"
+    );
+    assert_eq!(
+        redact_credentials("http://username-only@proxy.corp:8080/private/path"),
+        "http://proxy.corp:8080"
     );
     assert!(!redact_credentials("http://u:p@h/x?q=1").contains("q=1"));
     assert_eq!(
@@ -290,10 +294,10 @@ fn credential_redaction_covers_parsable_and_opaque_forms() {
         "http://plain.host/path",
         "no credentials => unchanged (nothing to hide)"
     );
-    // Unparseable forms must never echo a userinfo or path tail back.
+    // Unparseable forms must never echo userinfo or path tails back.
     let r = redact_credentials("socks5://user:pw@10.0.0.1:1080/secret-tail");
     assert!(
-        r.contains("***@") && !r.contains("pw") && !r.contains("secret-tail"),
+        !r.contains("user") && !r.contains("pw") && !r.contains("secret-tail"),
         "{r}"
     );
     assert_eq!(redact_credentials("not a url at all"), "[redacted]");
@@ -302,6 +306,18 @@ fn credential_redaction_covers_parsable_and_opaque_forms() {
         "https://hooks.slack.com"
     );
     assert_eq!(redact_url_origin("garbage"), "[redacted]");
+}
+
+#[test]
+fn observation_redaction_catches_urls_embedded_in_error_text() {
+    let text = redact_observation_text(
+        "request to https://alice:topsecret@example.test/private?token=secret failed",
+    );
+    assert_eq!(text, "request to https://example.test failed");
+    assert!(!text.contains("alice"));
+    assert!(!text.contains("topsecret"));
+    assert!(!text.contains("secret"));
+    assert_eq!(redact_observation_text("Bearer abc.def"), "Bearer ***");
 }
 
 #[test]
@@ -534,6 +550,38 @@ fn validate_rejects_insecure_or_contradictory_configs() {
         );
     }
 
+    let mut zero_target = base();
+    zero_target["targets"][0]["max_pages"] = serde_json::json!(0);
+    let mut zero_target_cfg: Config = serde_json::from_value(zero_target).unwrap();
+    let target_error = zero_target_cfg.validate().unwrap_err().to_string();
+    assert!(
+        target_error.contains("target t: max_pages = 0"),
+        "{target_error}"
+    );
+
+    let mut oversized = base();
+    oversized["max_response_bytes"] = serde_json::json!(65 * 1024 * 1024);
+    let mut oversized_cfg: Config = serde_json::from_value(oversized).unwrap();
+    let oversized_error = oversized_cfg.validate().unwrap_err().to_string();
+    assert!(
+        oversized_error.contains("hard 64 MiB per-response ceiling"),
+        "{oversized_error}"
+    );
+
+    let mut weighted = base();
+    weighted["concurrency"] = serde_json::json!(64);
+    weighted["max_response_bytes"] = serde_json::json!(16 * 1024 * 1024);
+    let mut weighted_cfg: Config = serde_json::from_value(weighted).unwrap();
+    weighted_cfg
+        .validate()
+        .expect("exactly 1 GiB reservation is allowed");
+    weighted_cfg.max_response_bytes += 1;
+    let weighted_error = weighted_cfg.validate().unwrap_err().to_string();
+    assert!(
+        weighted_error.contains("in-flight response budget"),
+        "{weighted_error}"
+    );
+
     // loopback + strong token is accepted even with 600s timeouts (edge of range)
     let mut v = base();
     v["admin_token"] = serde_json::json!("0123456789abcdef");
@@ -582,4 +630,42 @@ fn postgres_dsn_shape_is_checked_not_leaked() {
             "unexpected: {e}"
         );
     }
+}
+
+#[test]
+fn audit_transport_and_rate_policy_inputs_are_checked() {
+    for url in [
+        "file:///etc/passwd",
+        "ftp://example.com/data",
+        "mailto:me@example.com",
+    ] {
+        let mut c: Config = serde_json::from_str(GOOD).unwrap();
+        c.targets[0].start_url = url.into();
+        assert!(c.validate().is_err(), "non-HTTP start URL: {url}");
+    }
+    for rps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut c: Config = serde_json::from_str(GOOD).unwrap();
+        c.default_policy.requests_per_sec = rps;
+        assert!(c.validate().is_err(), "unusable requests_per_sec: {rps}");
+    }
+    let mut c: Config = serde_json::from_str(GOOD).unwrap();
+    c.default_policy.burst = 0;
+    assert!(c.validate().is_err(), "zero burst never gives a permit");
+    let mut c: Config = serde_json::from_str(GOOD).unwrap();
+    c.targets[0].link_selector = Some("[".into());
+    assert!(
+        c.validate().is_err(),
+        "invalid discovery selector must not silently fall back"
+    );
+    let mut c: Config = serde_json::from_str(GOOD).unwrap();
+    c.output = SinkCfg::Http {
+        url: "file:///tmp/x".into(),
+        batch_max: 0,
+        timeout_secs: 0,
+        auth: None,
+    };
+    assert!(
+        c.validate().is_err(),
+        "invalid HTTP sink must fail at validate time"
+    );
 }

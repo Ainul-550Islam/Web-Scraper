@@ -50,7 +50,7 @@ fn http_bytes(
         .map(|t| format!("authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nhost: x\r\n{auth}content-length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-length: {}\r\n\r\n{body}",
         body.len()
     );
     sock.write_all(req.as_bytes()).unwrap();
@@ -282,7 +282,11 @@ impl Fixture {
     /// Where this job's delivery landed on disk. The API never exposes the
     /// path; the test owns the workspace, so it can compute it.
     fn delivery_dir(&self, job_id: &str) -> PathBuf {
-        self.dir.join("out").join("deliveries").join(job_id)
+        self.dir
+            .join("out")
+            .join(".harvest-control")
+            .join("deliveries")
+            .join(job_id)
     }
 
     /// One export job, waited for, asserted completed.

@@ -4,11 +4,9 @@ global:
 
 scrape_configs:
   - job_name: harvest
-    # If the harvest config sets admin_token, the scrape must present it.
-    # Prometheus expands $VAR from its process environment (compose passes
-    # HARVEST_ADMIN_TOKEN through). Unset => empty bearer, which is ignored
-    # by a token-less server and 401s against a tokened one (fail closed).
+    # Created with mode 0600 by prometheus-entrypoint.sh, owned by the
+    # runtime user. No literal $VAR is ever sent as a bearer credential.
     authorization:
-      credentials: "$HARVEST_ADMIN_TOKEN"
+      credentials_file: /tmp/harvest-admin-token
     static_configs:
       - targets: ["harvest:9678"]

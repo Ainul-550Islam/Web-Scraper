@@ -131,7 +131,7 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedCache<K, V> {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let found = g.map.get(key).map(|e| (e.value.clone(), e.expires_at_ms));
         match found {
-            Some((value, expires)) if !expires.is_some_and(|x| x <= now) => {
+            Some((value, expires)) if expires.is_none_or(|x| x > now) => {
                 g.stats.hits += 1;
                 g.order.retain(|k| k != key);
                 g.order.push_back(key.clone());
@@ -157,7 +157,7 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedCache<K, V> {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.map
             .get(key)
-            .is_some_and(|e| !e.expires_at_ms.is_some_and(|x| x <= now))
+            .is_some_and(|e| e.expires_at_ms.is_none_or(|x| x > now))
     }
 
     pub fn insert(&self, key: K, value: V) {

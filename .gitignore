@@ -8,10 +8,12 @@ web/node_modules/
 web/dist/
 web/coverage/
 
-# local env files and incidental artifacts (never commit)
+# local env files, deployment secrets, and incidental artifacts (never commit)
 .env
 .env.*
 *.local
+/ops/harvest/config.json
+/ops/harvest/admin-token
 screenshots/
 web/node_modules/
 artifacts/

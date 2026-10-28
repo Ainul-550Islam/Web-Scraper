@@ -89,7 +89,7 @@ proxy rotation to reset a host refusal, CAPTCHA handling, browser execution.
 | `extract` | selector compile+select (html mode), JSONPath-lite (`$.a[*].b`), canonical fingerprint | network |
 | `sink` | `Sink` trait; jsonl/csv (header-once), sqlite (feature), dataset (per-day files), http (batches), null | reading config mid-run (all params injected at open) |
 | `pgsink` | `harvest_records` DDL (created if missing), batched INSERT `ON CONFLICT (run,target,fingerprint) DO NOTHING` | leaking DSN into errors beyond its own context strings |
-| `dist` | Redis job/inflight/dlq lists + dedup sets + fixed-window per-host limiter + idle drain + sweep | owning the sink (each worker writes its own fragment) |
+| `dist` | Redis job/inflight/dlq lists + dedup sets + atomic server-time token bucket, min-spacing, crawl-delay and refusal backoff + idle drain + sweep | owning the sink (each worker writes its own fragment) |
 | `ckpt` | atomic checkpoint file (tmp+rename), policy-sha drift refusal | auto-resuming (resume is operator-intent via `--resume`) |
 | `reval` | per-URL validators (etag/last-modified) + cached link sets (cap 500) + TTL condition | storing bodies |
 | `audit` | in-memory per-host recorder → atomic `audit.json` snapshot incl. totals + policy echo | sampling — every engine send is counted |

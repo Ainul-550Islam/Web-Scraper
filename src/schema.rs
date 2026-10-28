@@ -174,14 +174,11 @@ impl Schema {
         let Some(path) = &self.quarantine else {
             return Ok(None);
         };
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| anyhow::anyhow!("quarantine dir {}: {e}", parent.display()))?;
-            }
-        }
         let mut entry = Map::new();
-        entry.insert("url".into(), Value::String(url.to_string()));
+        entry.insert(
+            "url".into(),
+            Value::String(crate::config::redact_credentials(url)),
+        );
         entry.insert("depth".into(), Value::Number(depth.into()));
         entry.insert("ts".into(), Value::String(now_rfc3339()));
         entry.insert(
@@ -195,10 +192,7 @@ impl Schema {
         );
         entry.insert("fields".into(), Value::Object(fields.clone()));
         let line = serde_json::to_string(&Value::Object(entry))?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+        let mut file = crate::fsutil::open_append(path)
             .map_err(|e| anyhow::anyhow!("open quarantine {}: {e}", path.display()))?;
         writeln!(file, "{line}")?;
         Ok(Some(path.clone()))

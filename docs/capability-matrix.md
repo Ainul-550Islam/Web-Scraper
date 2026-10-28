@@ -30,7 +30,7 @@ a test exists that exercises it (run `cargo test --all-features` /
 | Prometheus text exposition | `src/metrics.rs` | core | metrics.rs | curl /metrics (buyer-demo §H) |
 | Alert rules + notify + ack | `src/alerts.rs` | core | alerts.rs | src/alerts/tests.rs; POST /alerts/ack (route_contract) |
 | Ops annotations | `src/ops.rs` | core | ops.rs | tests/ops_api.rs; POST /ops/note |
-| Admin HTTP API (23 GET + 2 POST) | `src/admin.rs` | core | admin.rs | tests/route_contract.rs pins every route |
+| Admin HTTP API (28 GET + 6 POST) | `src/admin.rs` | core | admin.rs | tests/route_contract.rs pins every route |
 | Export: csv+jsonl, manifest, split/per-part, resume | `src/export.rs` | core | export.rs | tests/export_parts.rs; buyer E2E §4 |
 | Export: XLSX workbook (typed cells, multi-sheet) | `src/export/xlsx.rs` | core | xlsx.rs | tests/export_formats.rs (package parts, typed cells, determinism) |
 | Export: PDF summary report (bounded sample) | `src/export/pdf.rs` | core | pdf.rs | tests/export_formats.rs (header/trailer, no full dump) |
@@ -49,8 +49,8 @@ a test exists that exercises it (run `cargo test --all-features` /
 | Config validation at startup | `src/config.rs` | core | config.rs | `harvest validate`; src/config/tests.rs |
 | Sitemap seeding | `src/sitemap.rs` | core | sitemap.rs | src/sitemap/tests.rs |
 | Dead-letter replay | `src/runner.rs` | core | runner.rs | `harvest run --retry-dlq` |
-| Graceful SIGINT drain | `src/engine.rs` | core | engine.rs | tests/e2e.rs; buyer E2E last check |
-| React console (26 routes, live polling) | `web/src` | — | web/src/app/routes/ROUTES.ts | 351 vitest tests; smoke; buyer E2E |
+| Graceful SIGINT/SIGTERM drain | `src/engine.rs` | core | engine.rs | tests/e2e.rs; buyer E2E last check |
+| React console (26 routes, live polling) | `web/src` | — | web/src/app/routes/ROUTES.ts | 368 Vitest tests across 126 files; 12 smoke checks; 18 buyer E2E checks |
 | Product tour + first-run welcome (real data) | `web/src/components/AppShell/` | — | ProductTour.tsx, WelcomePanel.tsx | product-tour/welcome-panel tests |
 | Health summary (6 groups) on Overview | `web/src/features/overview/Overview/HealthSummary.tsx` | — | HealthSummary.tsx | overview-health-summary.test.tsx |
 | Quality funnel w/ separate quarantine | `web/src/features/quality/` | — | Quality.tsx | quality page test (existing suite) |
@@ -59,9 +59,10 @@ a test exists that exercises it (run `cargo test --all-features` /
 
 Not offered (so buyers don't hunt for it): JS-rendered browser automation
 (`browser_launch` is a best-effort headless fetch hook), cloud dashboards,
-GUI config POST, asymmetric artifact signing, role-based access control,
-**HTTP endpoints for export generation or AI calls** (the CLI owns generation;
-the console composes commands and verifies locally), **any CAPTCHA, bot-detection,
-fingerprint or authentication bypass** (the AI layer has no transport of its own
-and never touches fetching), and **external AI calls by default** — a provider
-marked external is refused until `external_allowed` is set.
+GUI config POST, asymmetric artifact signing, role-based access control, and
+arbitrary server-side command execution. Bounded crawl/export/AI job endpoints
+are available under `/control/*`; they are not a shell or general-purpose
+execution API. This build's control-plane AI provider table contains only
+`deterministic-local` and `disabled`; setting `external_allowed` cannot add an
+unregistered hosted provider. **Any CAPTCHA, bot-detection, fingerprint or
+authentication bypass** is out of scope; the AI layer does not fetch pages.

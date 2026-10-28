@@ -1,50 +1,117 @@
-/**
- * redaction — structural secret-masking for arbitrary JSON (responses,
- * event details, pasted configs) that `maskSecrets` (line-oriented text
- * masking in `format.ts`) was not designed for.
- *
- * Rules, mirroring the server's own policy (`GET /config` nulls secrets and
- * never sends plaintext):
- *  - any object key matching the credential vocabulary below is replaced with
- *    the literal "***" in the OUTPUT COPY — the input object is never mutated
- *    (pages poll shared objects; mutating them would corrupt the cache);
- *  - URL-shaped strings carrying inline `user:pass@host` credentials have the
- *    userinfo redacted;
- *  - recursion covers nested records and arrays to any depth.
- *
- * This is display-side defense in depth: the browser only ever *sees* what
- * the API sent, but pasted content and future endpoints make a client-side
- * pass worth having. It is not a security boundary.
- */
-
-const SECRET_KEY_RE = /(token|authoriz|password|passwd|secret|webhook|api[_-]?key|dsn|credential)/i;
-const CRED_URL_RE = /\/\/[^/@\s]+@/;
-
+/** Display-side defense in depth; never mutates polled/shared objects. */
+const SECRET_KEY_RE = /(token|authoriz|password|passwd|secret|webhook|api[_-]?key|access[_-]?key|private[_-]?key|dsn|credential|cookie)/i;
+const CRED_URL_RE = /\/\/(?!\*\*\*@)[^/@\s]+@/;
 export const REDACTION_MARK = "***";
+export const MAX_MASK_NODES = 10_000;
+const MAX_MASK_DEPTH = 64;
 
-function redactUrlish(s: string): string {
-  return CRED_URL_RE.test(s) ? s.replace(/\/\/([^/@\s]*)@/, `//${REDACTION_MARK}@`) : s;
+function redactUrlish(value: string): string {
+  return value
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"<>]+/gi, (raw) => {
+      try {
+        const url = new URL(raw);
+        let changed = false;
+        if (url.username || url.password) {
+          url.username = REDACTION_MARK;
+          url.password = "";
+          changed = true;
+        }
+        for (const key of [...url.searchParams.keys()]) {
+          if (SECRET_KEY_RE.test(key) || key.toLowerCase() === "key") {
+            url.searchParams.set(key, REDACTION_MARK);
+            changed = true;
+          }
+        }
+        return changed ? url.toString() : raw;
+      } catch {
+        return raw;
+      }
+    })
+    .replace(/\/\/([^/@\s]*)@/g, `//${REDACTION_MARK}@`)
+    .replace(/\bBearer\s+[^\s"<>]+/gi, `Bearer ${REDACTION_MARK}`)
+    .replace(/([?&](?:token|access_token|api[_-]?key|key|password|secret)=)[^&#\s]*/gi, `$1${REDACTION_MARK}`);
 }
 
-export function deepMask<T>(value: T): T {
-  return deepMaskInner(value) as T;
+interface MaskBudget {
+  remaining: number;
+  exhausted: boolean;
 }
 
-function deepMaskInner(value: unknown): unknown {
-  if (typeof value === "string") return redactUrlish(value);
-  if (Array.isArray(value)) return value.map(deepMaskInner);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SECRET_KEY_RE.test(k) ? REDACTION_MARK : deepMaskInner(v);
-    }
-    return out;
+/**
+ * Redact a JSON-like value without mutating it and with a hard traversal cap.
+ * Once the budget is exhausted, the remainder is represented by `***`; this
+ * keeps render/copy work bounded and never exposes unvisited values.
+ */
+export function deepMask<T>(value: T, maxNodes = MAX_MASK_NODES): T {
+  const limit = Number.isFinite(maxNodes)
+    ? Math.max(1, Math.min(MAX_MASK_NODES, Math.floor(maxNodes)))
+    : MAX_MASK_NODES;
+  const budget: MaskBudget = { remaining: limit, exhausted: false };
+  return deepMaskInner(value, new WeakSet(), 0, budget) as T;
+}
+
+function defineSafe(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
+function deepMaskInner(
+  value: unknown,
+  ancestors: WeakSet<object>,
+  depth: number,
+  budget: MaskBudget,
+): unknown {
+  if (budget.remaining <= 0) {
+    budget.exhausted = true;
+    return REDACTION_MARK;
   }
-  return value;
+  budget.remaining -= 1;
+
+  if (typeof value === "string") return redactUrlish(value);
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= MAX_MASK_DEPTH || ancestors.has(value)) return REDACTION_MARK;
+
+  ancestors.add(value);
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (budget.remaining <= 0) {
+        copy.push(REDACTION_MARK);
+        budget.exhausted = true;
+        break;
+      }
+      copy.push(deepMaskInner(value[index], ancestors, depth + 1, budget));
+      if (budget.exhausted) break;
+    }
+    ancestors.delete(value);
+    return copy;
+  }
+
+  const copy: Record<string, unknown> = {};
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (budget.remaining <= 0) {
+      defineSafe(copy, "__truncated", REDACTION_MARK);
+      budget.exhausted = true;
+      break;
+    }
+    const item = (value as Record<string, unknown>)[key];
+    if (SECRET_KEY_RE.test(key)) {
+      budget.remaining -= 1;
+      defineSafe(copy, key, REDACTION_MARK);
+    } else {
+      defineSafe(copy, key, deepMaskInner(item, ancestors, depth + 1, budget));
+    }
+    if (budget.exhausted) break;
+  }
+  ancestors.delete(value);
+  return copy;
 }
 
-/** True when `text` looks like it still contains a credential-bearing URL —
- *  used by tests and by the JSON inspector's copy guard. */
 export function looksUnredacted(text: string): boolean {
-  return CRED_URL_RE.test(text);
+  return CRED_URL_RE.test(text) || /[?&](?:token|api[_-]?key|access_token|password|secret)=(?!\*\*\*|%2A%2A%2A)[^&#\s]+/i.test(text);
 }

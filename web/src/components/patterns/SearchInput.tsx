@@ -1,6 +1,6 @@
 // SearchInput — split from patterns.tsx; barrel re-exports keep every public path & name
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon } from "../Icons";
 import { useDebounced } from "../../hooks/useDebounced";
 
@@ -19,18 +19,12 @@ export function SearchInput({
   label: string;
   debounceMs?: number;
 }) {
-  const [local, setLocal] = useState(value);
+  const [draft, setDraft] = useState<{ source: string; value: string }>({ source: value, value });
+  const local = draft.source === value ? draft.value : value;
   const deb = useDebounced(local, debounceMs);
-  const skip = useRef(true);
-  useEffect(() => setLocal(value), [value]);
   useEffect(() => {
-    if (skip.current) {
-      skip.current = false;
-      return;
-    }
-    onChange(deb);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deb]);
+    if (deb === local && deb !== value) onChange(deb);
+  }, [deb, local, value, onChange]);
   return (
     <span className="search">
       <Icon.Search size={12} />
@@ -41,7 +35,7 @@ export function SearchInput({
         aria-label={label}
         placeholder={placeholder}
         value={local}
-        onChange={(e) => setLocal(e.target.value)}
+        onChange={(e) => setDraft({ source: value, value: e.target.value })}
       />
     </span>
   );

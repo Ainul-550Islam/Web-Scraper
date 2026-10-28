@@ -144,7 +144,7 @@ pub fn write_xlsx(path: &Path, sheet: &Sheet, opts: &XlsxOpts) -> Result<XlsxRep
     if sheet.columns.is_empty() {
         bail!("xlsx export needs at least one column");
     }
-    let max_rows = opts.max_rows_per_sheet.clamp(1, EXCEL_MAX_ROWS);
+    let max_rows = opts.max_rows_per_sheet.clamp(1, EXCEL_MAX_ROWS - 1);
     let max_cols = opts.max_cols.clamp(1, EXCEL_MAX_COLS);
     let max_chars = opts.max_cell_chars.clamp(1, EXCEL_MAX_CELL_CHARS);
 
@@ -197,6 +197,11 @@ pub fn write_xlsx(path: &Path, sheet: &Sheet, opts: &XlsxOpts) -> Result<XlsxRep
                 columns.len(),
                 &mut truncated,
             );
+            let retained: usize = parts.iter().map(|(_, body)| body.len()).sum();
+            if retained.saturating_add(xml.len()) as u64 > crate::export_io::remaining() {
+                bail!("XLSX exceeds the export output byte budget");
+            }
+            crate::work_cancel::check()?;
         }
         xml.push_str("</sheetData></worksheet>");
         rows_written += rows.len() as u64;
@@ -259,8 +264,15 @@ fn push_row(
         match cell {
             Cell::Null => { /* blank cell: nothing to write */ }
             Cell::Text(mut s) => {
-                if s.chars().count() > max_chars {
-                    s = s.chars().take(max_chars).collect();
+                if s.encode_utf16().count() > max_chars {
+                    let mut units = 0usize;
+                    s = s
+                        .chars()
+                        .take_while(|c| {
+                            units += c.len_utf16();
+                            units <= max_chars
+                        })
+                        .collect();
                     *truncated += 1;
                 }
                 xml.push_str(&format!(

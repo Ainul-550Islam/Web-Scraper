@@ -15,7 +15,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -25,13 +25,15 @@ jobs:
     name: Web console (typecheck, lint, test, build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+        working-directory: web
+      - run: npm audit --audit-level=low
         working-directory: web
       - run: npm run typecheck
         working-directory: web
@@ -46,7 +48,7 @@ jobs:
     name: Clippy (all targets, all features, -D warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -59,7 +61,7 @@ jobs:
     name: Test (default features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
@@ -96,9 +98,9 @@ jobs:
       # Defaults in the tests already point here; set explicitly so a service
       # config change fails loudly instead of silently skipping.
       HARVEST_TEST_REDIS_URL: "redis://127.0.0.1:6399/9"
-      HARVEST_PG_DSN: "host=127.0.0.1 port=5432 user=harvest password=harvest dbname=harvest"
+      HARVEST_PG_DSN: "host=127.0.0.1 port=5432 user=harvest password=harvest dbname=harvest sslmode=disable"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets --all-features
@@ -113,7 +115,7 @@ jobs:
       matrix:
         features: ["", "sqlite", "postgres", "redis"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check --all-targets ${{ matrix.features }}
@@ -123,7 +125,7 @@ jobs:
     name: Release build + CLI smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --all-features
@@ -141,11 +143,21 @@ jobs:
       # Buyer-flow E2E against real local backends only (demo mock site +
       # `harvest serve` + built console + CLI export/verify) — deterministic,
       # single pass, no external network.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: cd web && npm ci --no-audit --no-fund
       - run: cd web && npm run build
       - run: cd web && HARVEST_BIN="$GITHUB_WORKSPACE/target/release/harvest" npm run e2e:buyer
+
+  security:
+    name: Rust advisory and maintenance audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --deny warnings

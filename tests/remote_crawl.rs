@@ -40,7 +40,7 @@ fn http(
         .map(|t| format!("authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nhost: x\r\n{auth}content-length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-length: {}\r\n\r\n{body}",
         body.len()
     );
     sock.write_all(req.as_bytes()).unwrap();

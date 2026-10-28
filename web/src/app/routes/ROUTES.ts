@@ -54,6 +54,8 @@ export const ROUTES: RouteDef[] = [
     title: "Export Center", desc: "Filter, preview, format, prepare and verify a delivery" },
   { path: "/crawl", label: "Crawl Studio", icon: "Pipeline", group: "Delivery",
     title: "Crawl Studio", desc: "Compose a bounded crawl plan against the engine's own limits" },
+  { path: "/browser-studio", label: "Browser Studio", icon: "Pipeline", group: "Delivery",
+    title: "Browser Studio", desc: "Preview authorized browser pages, build selectors, and test workflows" }
   { path: "/ai", label: "AI Assist", icon: "Info", group: "Delivery",
     title: "AI Assist", desc: "Optional assisted extraction — off by default, never authoritative" },
   { path: "/control", label: "Control Jobs", icon: "Monitor", group: "Delivery",

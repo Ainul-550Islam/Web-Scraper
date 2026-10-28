@@ -10,11 +10,12 @@
  * The page polls while the job can still change (queued/running) and stops
  * once it is terminal, so a finished job costs the server nothing.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Button, Card, CopyButton, EmptyState, ErrorState, MetricCard, PageHeader, StatusChip } from "../components/ui";
 import { Page } from "../components/AppShell";
 import { ArtifactList, type ArtifactRow } from "../components/patterns/ArtifactList";
-import { JobStateBadge, canCancel, isTerminal, jobBlurb } from "../components/patterns/JobStateBadge";
+import { JobStateBadge } from "../components/patterns/JobStateBadge";
+import { canCancel, isTerminal, jobBlurb } from "../components/patterns/JobState.model";
 import { apiDownload, apiGet, apiPost, saveDownload, ApiError } from "../lib/api";
 import { usePolled } from "../hooks/usePolled";
 import { useToasts } from "../hooks/useToasts";
@@ -41,25 +42,17 @@ export default function ControlJobDetail() {
   const jobId = route.query.get("job") ?? "";
   const toasts = useToasts();
   const [busyId, setBusyId] = useState<string | null>(null);
-  // mirrored state: the poll interval has to be known *before* the hook runs,
-  // so the last state the server reported is kept alongside it
-  const [jobState, setJobState] = useState<string | null>(null);
-
   // Poll every 2 s while the job can still change; once it is terminal the
   // interval stretches to 10 minutes, so a finished job costs the server
   // (almost) nothing and the page still parks on the final record.
-  const terminal = jobState !== null && isTerminal(jobState);
   const poller = usePolled<ControlJob>(
     (s) => apiGet<ControlJob>(`/control/jobs/${encodeURIComponent(jobId)}`, { signal: s, noCache: true }),
-    terminal ? 600_000 : 2_000,
-    `${jobId}|${terminal}`,
+    (data) => data && isTerminal(data.state) ? 600_000 : 2_000,
+    jobId,
   );
   const detail = poller.data;
   const error = poller.error;
 
-  useEffect(() => {
-    if (detail && detail.state !== jobState) setJobState(detail.state);
-  }, [detail, jobState]);
 
   const verify = useCallback(
     async (a: ArtifactRow) => {

@@ -350,15 +350,9 @@ impl Runtime {
 /// test runtime never blocks on disk.
 pub async fn events_log_writer(bus: Arc<Bus>, path: std::path::PathBuf) -> anyhow::Result<u64> {
     use tokio::io::AsyncWriteExt;
-    if let Some(p) = path.parent() {
-        let _ = tokio::fs::create_dir_all(p).await;
-    }
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .await
+    let std_file = crate::fsutil::open_append(&path)
         .map_err(|e| anyhow::anyhow!("events log {}: {e}", path.display()))?;
+    let mut file = tokio::fs::File::from_std(std_file);
     let mut cursor = 0u64;
     let mut written = 0u64;
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -392,9 +386,38 @@ mod tests;
 #[derive(Clone, Default)]
 pub struct RuntimeSlot {
     inner: Arc<Mutex<Option<Arc<Runtime>>>>,
+    output_gate: Arc<tokio::sync::Mutex<()>>,
+    pacing: Arc<Mutex<Option<Arc<crate::policy::Politeness>>>>,
 }
 
 impl RuntimeSlot {
+    /// Serialize configured output mutations/snapshots across scheduler and control jobs.
+    pub(crate) async fn output_guard(
+        &self,
+        stop: Option<&std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<tokio::sync::OwnedMutexGuard<()>> {
+        let wait = self.output_gate.clone().lock_owned();
+        tokio::pin!(wait);
+        loop {
+            if stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed)) {
+                anyhow::bail!("cancelled while waiting for storage");
+            }
+            tokio::select! { guard = &mut wait => return Ok(guard), _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+        }
+    }
+    pub(crate) fn shared_pacing(&self, cfg: &Config) -> Arc<crate::policy::Politeness> {
+        self.pacing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(|| Arc::new(crate::policy::Politeness::new(cfg)))
+            .clone()
+    }
+    pub(crate) fn isolated(&self) -> Self {
+        Self {
+            pacing: self.pacing.clone(),
+            ..Self::default()
+        }
+    }
     pub fn set(&self, rt: Arc<Runtime>) {
         *self.inner.lock().unwrap_or_else(|p| p.into_inner()) = Some(rt);
     }

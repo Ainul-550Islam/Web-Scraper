@@ -3,9 +3,14 @@ FROM rust:1.88-slim AS build
 WORKDIR /app
 # minimal deps: rustls => no openssl needed; bundled sqlite only when feature on
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
-RUN cargo build --release --features "sqlite postgres" && \
+# Cargo parses explicitly declared benchmark targets even for a bin build.
+COPY benches ./benches
+ARG HARVEST_FEATURES="sqlite postgres redis"
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS
+RUN cargo build --locked --release --features "$HARVEST_FEATURES" && \
     cp target/release/harvest /harvest
 
 # --- runtime stage ----------------------------------------------------------
@@ -17,10 +22,11 @@ COPY --from=build /harvest /usr/local/bin/harvest
 USER harvest
 EXPOSE 9678
 VOLUME ["/var/lib/harvest"]
-# Liveness via the auth-exempt /health probe; pure-bash /dev/tcp keeps the
-# runtime image free of curl/wget. Assumes metrics_addr on :9678 (the
-# default) — change here together with the config if you move the port.
+# Liveness via harvest's built-in /health client. Exec form keeps the
+# runtime image independent of bash/curl/wget and returns a failing exit code
+# when the live admin endpoint is unhealthy. AdminClient takes HOST:PORT
+# (not a scheme-bearing URL); the CLI probe targets :9678.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/9678 && printf "GET /health HTTP/1.0\r\n\r\n" >&3 && grep -q "\"ok\"" <&3'
+    CMD ["harvest", "health", "--url", "127.0.0.1:9678", "--json"]
 ENTRYPOINT ["harvest"]
 CMD ["run", "--config", "/etc/harvest/config.json"]

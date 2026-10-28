@@ -202,14 +202,9 @@ impl Recorder {
     /// Atomic write of the final report; returns it for logging/testing.
     pub fn save(&self, cfg: &Config, path: &Path) -> Result<serde_json::Value> {
         let report = self.snapshot(cfg);
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p).ok();
-        }
         let body = serde_json::to_string_pretty(&report).context("serialize audit report")?;
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&tmp, format!("{body}\n"))
-            .with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("rename -> {}", path.display()))?;
+        crate::fsutil::write_private_atomic(path, format!("{body}\n").as_bytes())
+            .with_context(|| format!("write audit report {}", path.display()))?;
         Ok(report)
     }
 }

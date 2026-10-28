@@ -13,26 +13,21 @@
 import { useMemo, useState } from "react";
 import { Button, Card, CopyButton, Field, NumberInput, Segmented, SelectInput, TextInput, Toggle } from "../ui";
 import { FormSection } from "./FormSection";
-
-export const CONTROL_OPS = ["crawl", "export", "ai"] as const;
-export type ControlOp = (typeof CONTROL_OPS)[number];
-
-/* Ceilings mirrored from src/control.rs — keep in step, and say so in the UI. */
-export const CEILINGS = {
-  maxPages: 1_000_000, // crawl::MAX_PAGES_CEILING
-  maxDepth: 20, // crawl::MAX_DEPTH_CEILING
-  maxRecords: 5_000_000, // MAX_RECORDS_CEILING
-  maxExportBytes: 1_073_741_824, // MAX_EXPORT_BYTES_CEILING (1 GiB)
-  maxAiInputBytes: 4_194_304, // MAX_AI_INPUT_CEILING (4 MiB)
-  timeoutSecs: 3_600, // MAX_TIMEOUT_SECS
-  maxConcurrentJobs: 8, // MAX_CONCURRENT_JOBS
-  maxQueueDepth: 64, // MAX_QUEUE_DEPTH
-} as const;
-
-export const EXPORT_FORMATS = ["csv", "jsonl", "xlsx", "pdf", "parquet", "xml", "zip"] as const;
-export const AI_TASKS = ["extract", "classify", "normalize", "schema-suggest", "label"] as const;
-/** The two providers this build registers; there is no way to ask for another. */
-export const AI_PROVIDERS = ["deterministic-local", "disabled"] as const;
+import {
+  AI_PROVIDERS,
+  AI_TASKS,
+  CEILINGS,
+  CONTROL_OPS,
+  EXPORT_FORMATS,
+  MAX_AI_FIELD_VALUE_BYTES,
+  MAX_AI_INLINE_FIELDS,
+  buildCommand,
+  emptyDraft,
+  validateCommand,
+  type CommandDraft,
+  type CommandLimits,
+  type ControlOp,
+} from "./CommandComposer.model";
 
 /** A compact, non-blocking note (the ui `InlineError` takes an ApiError). */
 function Note({ message }: { message: string }) {
@@ -51,194 +46,6 @@ function Switch({ label, checked, onChange }: { label: string; checked: boolean;
       <span className="t-caption">{label}</span>
     </span>
   );
-}
-
-export interface CommandLimits {
-  max_pages: number;
-  max_depth: number;
-  max_records: number;
-  max_export_bytes: number;
-  max_ai_input_bytes: number;
-  timeout_secs: number;
-}
-
-export interface CrawlDraft {
-  targets: string[];
-  limits: CommandLimits;
-}
-
-export interface ExportDraft {
-  formats: string[];
-  dataset: string;
-  bundle: boolean;
-  verify: boolean;
-  max_records: number;
-  limits: CommandLimits;
-}
-
-export interface AiDraft {
-  task: string;
-  provider: string;
-  confidence: number;
-  external_allowed: boolean;
-  source_kind: "run_output" | "inline";
-  record_limit: number;
-  field_limit: number;
-  limits: CommandLimits;
-}
-
-export type CommandDraft =
-  | { op: "crawl"; crawl: CrawlDraft }
-  | { op: "export"; export: ExportDraft }
-  | { op: "ai"; ai: AiDraft };
-
-const LIMITS: CommandLimits = {
-  max_pages: 100,
-  max_depth: 1,
-  max_records: 100_000,
-  max_export_bytes: 268_435_456,
-  max_ai_input_bytes: 1_048_576,
-  timeout_secs: 900,
-};
-
-// eslint-disable-next-line react-refresh/only-export-components -- a shared helper lives with the component it serves
-export function emptyDraft(op: ControlOp, targetIds: string[] = []): CommandDraft {
-  if (op === "crawl") {
-    return {
-      op: "crawl",
-      crawl: {
-        targets: targetIds.length === 1 ? [targetIds[0]!] : [],
-        limits: { ...LIMITS },
-      },
-    };
-  }
-  if (op === "export") {
-    return {
-      op: "export",
-      export: {
-        formats: ["csv", "jsonl"],
-        dataset: "",
-        bundle: false,
-        verify: true,
-        max_records: 0,
-        limits: { ...LIMITS },
-      },
-    };
-  }
-  return {
-    op: "ai",
-    ai: {
-      task: "classify",
-      provider: "deterministic-local",
-      confidence: 0.9,
-      external_allowed: false,
-      source_kind: "run_output",
-      record_limit: 100,
-      field_limit: 32,
-      limits: { ...LIMITS },
-    },
-  };
-}
-
-/** The JSON body the route expects — nothing more, nothing renamed. */
-// eslint-disable-next-line react-refresh/only-export-components -- a shared helper lives with the component it serves
-export function buildCommand(draft: CommandDraft): Record<string, unknown> {
-  if (draft.op === "crawl") {
-    return {
-      op: "crawl",
-      targets: draft.crawl.targets,
-      limits: draft.crawl.limits,
-    };
-  }
-  if (draft.op === "export") {
-    const e = draft.export;
-    return {
-      op: "export",
-      formats: e.formats,
-      dataset: e.dataset.trim() ? e.dataset.trim() : null,
-      bundle: e.bundle,
-      verify: e.verify,
-      max_records: e.max_records > 0 ? e.max_records : null,
-      limits: e.limits,
-    };
-  }
-  const a = draft.ai;
-  return {
-    op: "ai",
-    task: a.task,
-    provider: a.provider,
-    confidence: a.confidence,
-    external_allowed: a.external_allowed,
-    source:
-      a.source_kind === "inline"
-        ? { kind: "inline", fields: [] }
-        : { kind: "run_output", record_limit: a.record_limit, field_limit: a.field_limit },
-    limits: a.limits,
-  };
-}
-
-export interface CommandIssue {
-  field: string;
-  message: string;
-}
-
-/**
- * Client-side mirror of the server's validation. Anything it catches, the
- * server would have caught too — this only saves the round trip and tells the
- * operator *before* they press submit.
- */
-// eslint-disable-next-line react-refresh/only-export-components -- a shared helper lives with the component it serves
-export function validateCommand(draft: CommandDraft, targetIds: string[] = []): CommandIssue[] {
-  const issues: CommandIssue[] = [];
-  const limits =
-    draft.op === "crawl"
-      ? draft.crawl.limits
-      : draft.op === "export"
-        ? draft.export.limits
-        : draft.ai.limits;
-  const check = (field: string, value: number, ceiling: number, min = 1) => {
-    if (!Number.isFinite(value) || value < min) {
-      issues.push({ field, message: `${field} must be at least ${min}` });
-    } else if (value > ceiling) {
-      issues.push({ field, message: `${field} ${value} exceeds the ceiling ${ceiling}` });
-    }
-  };
-  check("limits.max_pages", limits.max_pages, CEILINGS.maxPages);
-  check("limits.max_depth", limits.max_depth, CEILINGS.maxDepth, 0);
-  check("limits.max_records", limits.max_records, CEILINGS.maxRecords);
-  check("limits.max_export_bytes", limits.max_export_bytes, CEILINGS.maxExportBytes);
-  check("limits.max_ai_input_bytes", limits.max_ai_input_bytes, CEILINGS.maxAiInputBytes);
-  check("limits.timeout_secs", limits.timeout_secs, CEILINGS.timeoutSecs);
-
-  if (draft.op === "crawl") {
-    if (draft.crawl.targets.length === 0) {
-      issues.push({ field: "targets", message: "pick at least one target" });
-    }
-    for (const t of draft.crawl.targets) {
-      if (targetIds.length > 0 && !targetIds.includes(t)) {
-        issues.push({ field: "targets", message: `the attached config declares no target \`${t}\`` });
-      }
-    }
-  }
-  if (draft.op === "export" && draft.export.formats.length === 0) {
-    issues.push({ field: "formats", message: "pick at least one format" });
-  }
-  if (draft.op === "ai") {
-    if (draft.ai.confidence < 0 || draft.ai.confidence > 1) {
-      issues.push({ field: "confidence", message: "confidence must be within [0, 1]" });
-    }
-    if (draft.ai.external_allowed && draft.ai.provider === "disabled") {
-      issues.push({
-        field: "external_allowed",
-        message: "consent has no effect for the disabled provider",
-      });
-    }
-    if (draft.ai.source_kind === "run_output") {
-      check("source.record_limit", draft.ai.record_limit, 512);
-      check("source.field_limit", draft.ai.field_limit, 512);
-    }
-  }
-  return issues;
 }
 
 export function CommandComposer({
@@ -446,6 +253,96 @@ export function CommandComposer({
                 />
               </Field>
             </div>
+            {draft.ai.source_kind === "inline" && (
+              <div style={{ display: "grid", gap: 10 }}>
+                <p className="t-caption" style={{ margin: 0 }}>
+                  Inline fields are sent only to the selected local provider in this build. Names are limited to 64 UTF-8 bytes; values to 4,096 bytes.
+                </p>
+                {draft.ai.inline_fields.map((field, index) => (
+                  <div
+                    key={`inline-field-${index}`}
+                    style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", alignItems: "end" }}
+                  >
+                    <Field label={`Inline field ${index + 1} name`}>
+                      <TextInput
+                        aria-label={`Inline field ${index + 1} name`}
+                        value={field.name}
+                        maxLength={64}
+                        onChange={(event) => onChange({
+                          ...draft,
+                          ai: {
+                            ...draft.ai,
+                            inline_fields: draft.ai.inline_fields.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, name: event.target.value } : item,
+                            ),
+                          },
+                        })}
+                      />
+                    </Field>
+                    <Field label={`Inline field ${index + 1} value`}>
+                      <TextInput
+                        aria-label={`Inline field ${index + 1} value`}
+                        value={field.value}
+                        maxLength={MAX_AI_FIELD_VALUE_BYTES}
+                        onChange={(event) => onChange({
+                          ...draft,
+                          ai: {
+                            ...draft.ai,
+                            inline_fields: draft.ai.inline_fields.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, value: event.target.value } : item,
+                            ),
+                          },
+                        })}
+                      />
+                    </Field>
+                    <Field label={`Inline field ${index + 1} deterministic value`}>
+                      <TextInput
+                        aria-label={`Inline field ${index + 1} deterministic value`}
+                        value={field.deterministic}
+                        maxLength={MAX_AI_FIELD_VALUE_BYTES}
+                        onChange={(event) => onChange({
+                          ...draft,
+                          ai: {
+                            ...draft.ai,
+                            inline_fields: draft.ai.inline_fields.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, deterministic: event.target.value } : item,
+                            ),
+                          },
+                        })}
+                      />
+                    </Field>
+                    <Button
+                      variant="ghost"
+                      onClick={() => onChange({
+                        ...draft,
+                        ai: {
+                          ...draft.ai,
+                          inline_fields: draft.ai.inline_fields.filter((_, itemIndex) => itemIndex !== index),
+                        },
+                      })}
+                    >
+                      Remove inline field {index + 1}
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="ghost"
+                  disabled={draft.ai.inline_fields.length >= MAX_AI_INLINE_FIELDS}
+                  onClick={() => onChange({
+                    ...draft,
+                    ai: {
+                      ...draft.ai,
+                      inline_fields: [
+                        ...draft.ai.inline_fields,
+                        { name: "", value: "", deterministic: "" },
+                      ],
+                    },
+                  })}
+                >
+                  Add inline field
+                </Button>
+              </div>
+            )}
             {draft.ai.external_allowed && (
               <Note message="Consent is recorded in the audit log. It cannot summon a provider this build does not register — the only provider here is local." />
             )}

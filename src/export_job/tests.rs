@@ -33,8 +33,7 @@ fn records(path: &std::path::Path, n: usize) {
     let mut out = String::new();
     for i in 0..n {
         out.push_str(&format!(
-            "{{\"run\":\"r\",\"target\":\"t\",\"url\":\"https://example.com/{i}\",\"depth\":0,\"ts\":1700000000,\"fingerprint\":\"fp{i}\",\"egress\":\"direct\",\"fields\":{{\"title\":\"T{i}\",\"price\":\"{}\"}}}}\n",
-            i
+            "{{\"run\":\"r\",\"target\":\"t\",\"url\":\"https://example.com/{i}\",\"depth\":0,\"ts\":1700000000,\"fingerprint\":\"fp{i}\",\"egress\":\"direct\",\"fields\":{{\"title\":\"T{i}\",\"price\":\"{i}\"}}}}\n"
         ));
     }
     std::fs::write(path, out).unwrap();
@@ -359,7 +358,11 @@ fn the_export_byte_cap_is_checked_against_what_landed_on_disk() {
         ..spec(&["csv", "jsonl"], false)
     };
     let e = run(&s, &cfg, &out).unwrap_err();
-    assert!(e.contains("over the 8 byte cap"), "{e}");
+    assert!(e.contains("byte budget exceeded"), "{e}");
+    assert!(
+        !out.join("manifest.json").exists(),
+        "an over-budget delivery must not be published as complete"
+    );
 }
 
 #[test]

@@ -223,7 +223,7 @@ pub fn write_xml(
             "<records>{}</records>",
             rows.len().min(opts.max_records.max(1))
         ));
-        out.push_str(&format!("<sources>{}</sources>", source_count));
+        out.push_str(&format!("<sources>{source_count}</sources>"));
         out.push_str("<columns>");
         for (original, name) in &usable {
             out.push_str(&format!(
@@ -267,6 +267,9 @@ pub fn write_xml(
                 ));
             }
         }
+        if out.len() as u64 > crate::export_io::remaining() {
+            bail!("XML exceeds the export output byte budget");
+        }
         out.push_str("</record>");
         written += 1;
     }
@@ -283,7 +286,7 @@ pub fn write_xml(
     ));
     {
         let mut f =
-            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            crate::export_io::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(out.as_bytes())?;
         f.flush()?;
         f.sync_all()?;

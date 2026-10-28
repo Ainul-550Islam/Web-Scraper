@@ -29,6 +29,10 @@ pub struct Metrics {
     pub pages_fetched: AtomicU64,
     pub records_extracted: AtomicU64,
     pub records_deduped: AtomicU64,
+    pub browser_sessions_created: AtomicU64,
+    pub browser_challenges_detected: AtomicU64,
+    pub browser_actions_completed: AtomicU64,
+    pub selector_records_previewed: AtomicU64,
     pub records_written: AtomicU64,
     pub domains_abandoned: AtomicU64,
     // Engine layer (job lifecycle / scheduler / breaker / budget). These
@@ -126,6 +130,18 @@ impl Metrics {
     }
     pub fn page_fetched(&self) {
         Self::inc(&self.pages_fetched);
+    }
+    pub fn browser_session_created(&self) {
+        Self::inc(&self.browser_sessions_created);
+    }
+    pub fn browser_challenge_detected(&self) {
+        Self::inc(&self.browser_challenges_detected);
+    }
+    pub fn browser_action_completed(&self) {
+        Self::inc(&self.browser_actions_completed);
+    }
+    pub fn selector_records_previewed(&self, count: usize) {
+        Self::add(&self.selector_records_previewed, count.min(100_000) as u64);
     }
     /// One acquisition refused by a bounded budget (see `crate::budget`).
     pub fn note_budget_denied(&self, scope: BudgetScope) {
@@ -281,6 +297,26 @@ impl Metrics {
                 g(&self.records_deduped),
             ),
             (
+                "harvest_browser_sessions_created",
+                "browser sessions created",
+                g(&self.browser_sessions_created),
+            ),
+            (
+                "harvest_browser_challenges_detected",
+                "observable browser challenges detected",
+                g(&self.browser_challenges_detected),
+            ),
+            (
+                "harvest_browser_actions_completed",
+                "browser workflow actions completed",
+                g(&self.browser_actions_completed),
+            ),
+            (
+                "harvest_selector_records_previewed",
+                "records returned by selector previews",
+                g(&self.selector_records_previewed),
+            ),
+            (
                 "harvest_records_written",
                 "records persisted",
                 g(&self.records_written),
@@ -433,6 +469,10 @@ impl Metrics {
             "pages_fetched": g(&self.pages_fetched),
             "records_extracted": g(&self.records_extracted),
             "records_deduped": g(&self.records_deduped),
+            "browser_sessions_created": g(&self.browser_sessions_created),
+            "browser_challenges_detected": g(&self.browser_challenges_detected),
+            "browser_actions_completed": g(&self.browser_actions_completed),
+            "selector_records_previewed": g(&self.selector_records_previewed),
             "records_written": g(&self.records_written),
             "domains_abandoned": g(&self.domains_abandoned),
             "jobs_completed": g(&self.jobs_completed),

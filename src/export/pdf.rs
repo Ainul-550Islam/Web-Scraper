@@ -235,7 +235,7 @@ pub fn write_pdf(path: &Path, doc: &PdfDoc, opts: &PdfOpts) -> Result<PdfReport>
     ));
     {
         let mut f =
-            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            crate::export_io::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(&bytes)?;
         f.flush()?;
         f.sync_all()?;
@@ -503,7 +503,7 @@ fn assemble(pages: &[Vec<u8>], doc: &PdfDoc, dropped: bool) -> Vec<u8> {
     }
     for id in 1..=max_id {
         match by_id.get(&id) {
-            Some(off) => out.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes()),
+            Some(off) => out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes()),
             None => out.extend_from_slice(b"0000000000 65535 f \n"),
         }
     }

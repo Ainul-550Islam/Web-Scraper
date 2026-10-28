@@ -107,6 +107,7 @@ fn chunking_cuts_at_record_boundaries_and_manifest_covers_all_parts() {
 
 #[test]
 fn resume_survives_a_crash_mid_finalize_and_reuses_valid_parts() {
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     let dir = tempfile();
     let input = fixture(&dir, 30);
@@ -135,9 +136,11 @@ fn resume_survives_a_crash_mid_finalize_and_reuses_valid_parts() {
         1,
         "the part before the victim was finalized"
     );
+    #[cfg(unix)]
     let ino_before = fs::metadata(&done_before[0]).unwrap().ino();
     fs::remove_dir(out.join(victim)).unwrap(); // fix the hazard
     let second = export::run(&opts(vec![input], &out, 350, true)).unwrap();
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&done_before[0]).unwrap().ino(),
         ino_before,

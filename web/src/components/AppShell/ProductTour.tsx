@@ -13,9 +13,6 @@ import { TOUR_PATHS, markTourDone } from "./TOUR_PATHS";
 export function ProductTour({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [i, setI] = useState(0);
   useEffect(() => {
-    if (open) setI(0);
-  }, [open]);
-  useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {

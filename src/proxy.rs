@@ -1,10 +1,21 @@
 //! Upstream proxy pool with health scoring.
 //!
+//! Provider, lease, health, and browser capabilities are additive modules;
+//! the legacy HTTP pool below retains its original selection semantics.
+//!
 //! Honest scope note: rotation here exists for **reliability** (a flaky
 //! provider gateway gets drained automatically) and **geography** (regional
 //! result sets). It is deliberately *not* wired to block handling: when a
 //! server refuses us, the politeness layer backs off that domain; the pool
 //! never "hides" a refusal.
+
+pub mod browser;
+pub mod credentials;
+pub mod health;
+pub mod lease;
+pub mod policy;
+pub mod provider;
+pub mod registry;
 
 use std::sync::Mutex;
 

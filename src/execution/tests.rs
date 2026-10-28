@@ -685,3 +685,59 @@ async fn inspection_returns_metadata_without_paths() {
         .contains(&h.root.to_string_lossy().to_string()));
     assert!(h.reg.inspect("art-99999").is_err());
 }
+
+#[test]
+fn phase2_job_retention_removes_owned_outputs_not_original_source() {
+    let h = harness("phase2-retention");
+    let source = h.root.join("source.jsonl");
+    records(&source, 1);
+    let command = ControlCommand::from_request(
+        "test-actor",
+        "req-retention",
+        br#"{"op":"export","formats":["csv"]}"#,
+        None,
+    )
+    .unwrap();
+    let old = h.reg.enqueue(&command).unwrap();
+    h.reg
+        .inner
+        .lock()
+        .unwrap()
+        .jobs
+        .get_mut(old.as_str())
+        .unwrap()
+        .state = ExecState::Completed;
+    let owned = h.root.join("deliveries").join(old.as_str());
+    std::fs::create_dir_all(&owned).unwrap();
+    let payload = owned.join("records.jsonl");
+    std::fs::write(&payload, b"{}\n").unwrap();
+    let artifact = h
+        .artifacts
+        .register(
+            payload,
+            "records.jsonl".into(),
+            ArtifactRole::Payload,
+            Some(old.as_str().into()),
+            VerificationState::NotRequested,
+        )
+        .unwrap();
+    h.artifacts
+        .finalize(artifact.as_str(), crate::control::sha256_hex(b"{}\n"))
+        .unwrap();
+    for _ in 0..MAX_JOBS {
+        let id = h.reg.enqueue(&command).unwrap();
+        h.reg
+            .inner
+            .lock()
+            .unwrap()
+            .jobs
+            .get_mut(id.as_str())
+            .unwrap()
+            .state = ExecState::Completed;
+    }
+    assert!(h.reg.get(old.as_str()).is_none());
+    assert!(!owned.exists());
+    assert!(h.artifacts.get(artifact.as_str()).is_none());
+    assert!(source.exists());
+    assert!(h.reg.len() <= MAX_JOBS);
+}

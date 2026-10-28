@@ -52,7 +52,7 @@ fn retry_after_is_respected_within_the_band() {
     let p = Politeness::new(&c);
     // first block: computed backoff 60s; a SHORTER Retry-After must not
     // undercut our own politeness, a LONGER one is honored, but a
-    // day-long header is clamped to the 1h band (run must progress).
+    // long header refuses the host; it must never shorten a site restriction.
     assert_eq!(
         p.note_block("a", &c, Some(Duration::from_secs(5))),
         Duration::from_secs(60)
@@ -65,8 +65,9 @@ fn retry_after_is_respected_within_the_band() {
     let p = Politeness::new(&c);
     assert_eq!(
         p.note_block("c", &c, Some(Duration::from_secs(7200))),
-        Duration::from_secs(3600)
+        Duration::from_secs(7200)
     );
+    assert!(p.is_abandoned("c", &c));
 }
 
 #[test]

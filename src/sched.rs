@@ -36,6 +36,8 @@ pub enum PushError {
     /// The bounded queue is full — caller drops the job (discovery stop),
     /// counted as backpressure.
     Full,
+    /// The job targets an index not present in this queue's target table.
+    InvalidTarget,
 }
 
 /// The shared crawl queue.
@@ -43,6 +45,7 @@ pub struct CrawlQueue {
     mode: SchedulingMode,
     max_depth: usize,           // 0 = unbounded
     per_target_inflight: usize, // 0 = unbounded (fair mode only applies it)
+    target_count: usize,
     inner: Mutex<Inner>,
     pushed: AtomicU64,
     rejected: AtomicU64,
@@ -98,6 +101,7 @@ impl CrawlQueue {
             mode,
             max_depth: cfg.max_queue_depth as usize,
             per_target_inflight: cfg.per_target_inflight as usize,
+            target_count: n_targets,
             inner: Mutex::new(inner),
             pushed: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
@@ -119,37 +123,64 @@ impl CrawlQueue {
 
     /// Enqueue for crawling. `Err(Full)` when the bounded depth is reached —
     /// the caller (discovery) simply stops adding, which IS the backpressure
-    /// signal; nothing is evicted and nothing blocks a worker.
+    /// signal; nothing is evicted and nothing blocks a worker. `InvalidTarget`
+    /// refuses indices outside the target table before they can reach a worker.
     pub fn push(&self, mut job: Job) -> Result<JobId, PushError> {
         job.state = JobState::Pending;
         let id = job.id;
+        if job.target >= self.target_count {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(PushError::InvalidTarget);
+        }
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             if self.max_depth > 0 && self.depth_of(&g) >= self.max_depth {
                 self.rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(PushError::Full);
             }
-            match self.mode {
-                SchedulingMode::Fifo => g.fifo.push_back(job),
-                SchedulingMode::Priority => {
-                    g.prio.push(job);
-                    // Sort key: higher rank first, then insertion seq for a
-                    // stable FIFO-within-priority. `sort_by` is stable.
-                    g.prio.sort_by(|a, b| {
-                        b.priority
-                            .rank()
-                            .cmp(&a.priority.rank())
-                            .then(a.id.cmp(&b.id))
-                    });
-                }
-                SchedulingMode::Fair => {
-                    let t = job.target.min(g.per_target.len().saturating_sub(1));
-                    g.per_target[t].push_back(job);
-                }
-            }
+            Self::insert(&mut g, self.mode, job);
         }
         self.pushed.fetch_add(1, Ordering::Relaxed);
         Ok(id)
+    }
+
+    /// Return an already-admitted in-flight job to the pending queue. This
+    /// bypasses the waiting-depth cap so shutdown/cancellation cannot lose
+    /// accepted work when other workers fill the queue while it is running.
+    /// The temporary excess is bounded by the number of active workers.
+    pub fn requeue(&self, mut job: Job) -> Result<JobId, PushError> {
+        job.state = JobState::Pending;
+        let id = job.id;
+        if job.target >= self.target_count {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(PushError::InvalidTarget);
+        }
+        {
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            Self::insert(&mut g, self.mode, job);
+        }
+        self.pushed.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    fn insert(g: &mut Inner, mode: SchedulingMode, job: Job) {
+        match mode {
+            SchedulingMode::Fifo => g.fifo.push_back(job),
+            SchedulingMode::Priority => {
+                g.prio.push(job);
+                // Sort key: higher rank first, then insertion seq for a
+                // stable FIFO-within-priority. `sort_by` is stable.
+                g.prio.sort_by(|a, b| {
+                    b.priority
+                        .rank()
+                        .cmp(&a.priority.rank())
+                        .then(a.id.cmp(&b.id))
+                });
+            }
+            SchedulingMode::Fair => {
+                g.per_target[job.target].push_back(job);
+            }
+        }
     }
 
     /// Pull the next runnable job. A queued job past its deadline is

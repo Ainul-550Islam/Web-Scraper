@@ -71,12 +71,38 @@ fn round_trip_atomic_save() {
         1,
         "no stray tmp files"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     let got = Checkpoint::load_validated(&path, &cfg).unwrap();
     assert_eq!(got.global_pages, 7);
     assert_eq!(got.pending[0].url, "http://127.0.0.1:1/p/9");
     assert_eq!(got.targets[0].visited.len(), 2);
     assert_eq!(got.targets[1].written, 4);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_loader_refuses_symlinked_state_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("harvest-ckpt-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let victim = dir.join("victim.json");
+    let link = dir.join("state.ckpt");
+    std::fs::write(&victim, b"{}\n").unwrap();
+    symlink(&victim, &link).unwrap();
+
+    let err = Checkpoint::load_validated(&link, &cfg_json(json!({}))).unwrap_err();
+    assert!(err.to_string().contains("read checkpoint"));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

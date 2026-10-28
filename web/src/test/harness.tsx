@@ -1,6 +1,3 @@
-/* eslint-disable react-refresh/only-export-components -- this module exports
- * fixtures and helpers (never a component); fast refresh is irrelevant to a
- * test harness, and splitting it would only hide the shared constants. */
 /**
  * Test harness: mounts a page tree with the real providers and stubs fetch
  * with the captured live-API fixtures (src/test/fixtures/*.json, recorded

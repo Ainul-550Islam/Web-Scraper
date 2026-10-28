@@ -29,7 +29,11 @@ These are behavioral guarantees, each pinned by a test — not aspirations:
   header and unbounded chunked streams are aborted mid-body; both classify
   as *permanent* — no retry loop (`src/fetcher.rs`,
   `tests/security.rs::response_size_caps_reject_without_retry_or_oom`).
-  Redirects stop after 5. Retries cap at 10 (validation) with a
+  Config validation also caps one response at 64 MiB and the nominal
+  `cap × effective workers` in-flight response-body reservation at 1 GiB
+  (effective workers are capped at 64). This is a body-buffer ceiling, not a
+  total-process RSS guarantee; DOM parsing and other runtime memory are
+  additional. Redirects stop after 5. Retries cap at 10 (validation) with a
   `max_single_wait_ms` sleep ceiling. Timeouts are mandatory (1..=600 s).
 - **Configured paths cannot climb.** `..` in any output/history/checkpoint/
   audit path is rejected at validate time (`src/config.rs`).

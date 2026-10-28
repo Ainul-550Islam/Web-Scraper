@@ -2,7 +2,7 @@
 //! batched HTTP webhook, and null (for load tests). Sinks are append-only and
 //! idempotent-safe: the engine dedups by fingerprint before writing.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,6 +12,22 @@ use serde::Serialize;
 use serde_json::Map;
 
 use crate::config::SinkCfg;
+
+fn ensure_output_directory(path: &Path) -> Result<()> {
+    crate::fsutil::reject_symlink_components(path)?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("create output directory {}", path.display()))?;
+    crate::fsutil::reject_symlink_components(path)?;
+    Ok(())
+}
+
+fn ensure_output_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    ensure_output_directory(parent)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Record {
@@ -30,6 +46,17 @@ pub trait Sink: Send + Sync {
     fn flush(&self) -> Result<()> {
         Ok(())
     }
+    /// Final barrier: no owned delivery worker may outlive a completed run.
+    fn finish(&self) -> Result<()> {
+        self.flush()
+    }
+}
+
+pub(crate) async fn finish_owned(sink: &std::sync::Arc<dyn Sink>) -> Result<()> {
+    let sink = sink.clone();
+    tokio::task::spawn_blocking(move || sink.finish())
+        .await
+        .map_err(|_| anyhow::anyhow!("sink finalizer panicked"))?
 }
 
 #[derive(Default)]
@@ -41,25 +68,53 @@ impl Sink for NullSink {
 }
 
 /// Batched webhook sink, fully off-thread: async callers only hand record
-/// JSON to an unbounded mpsc. A dedicated std thread owns everything
+/// JSON to a reservation-bounded mpsc (1024 records / 32 MiB). A dedicated std thread owns everything
 /// `reqwest::blocking` related (a blocking client builds and drops its own
 /// runtime, so it must never touch a tokio worker), batches POSTs, and
 /// reports failures back through the `flush()` ack. `flush()` blocks the
 /// calling task only at end-of-run, when nothing else needs it.
 pub struct HttpSink {
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    submit: Mutex<()>,
+    closed: std::sync::atomic::AtomicBool,
+    deadline: std::sync::Arc<crate::sink_lifecycle::DeliveryDeadline>,
     tx: std::sync::mpsc::Sender<Cmd>,
     pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pending_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub bytes_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub batches_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+pub(crate) fn reserve_buffer(
+    pending: &std::sync::atomic::AtomicUsize,
+    bytes: &std::sync::atomic::AtomicUsize,
+    n: usize,
+) -> Result<()> {
+    use std::sync::atomic::Ordering::SeqCst;
+    bytes
+        .fetch_update(SeqCst, SeqCst, |v| {
+            v.checked_add(n).filter(|v| *v <= 32 * 1024 * 1024)
+        })
+        .map_err(|_| anyhow::anyhow!("sink buffer byte capacity exhausted (32 MiB)"))?;
+    if pending
+        .fetch_update(SeqCst, SeqCst, |v| (v < 1024).then_some(v + 1))
+        .is_err()
+    {
+        bytes.fetch_sub(n, SeqCst);
+        anyhow::bail!("sink buffer record capacity exhausted (1024 records)");
+    }
+    Ok(())
 }
 
 enum Cmd {
     Push(String),
     Flush(std::sync::mpsc::Sender<Result<()>>),
+    Finish(std::sync::mpsc::Sender<Result<()>>),
     Shutdown,
 }
 
 struct SinkThread {
+    deadline: std::sync::Arc<crate::sink_lifecycle::DeliveryDeadline>,
     timeout_secs: u64,
     url: String,
     auth: Option<String>,
@@ -70,6 +125,7 @@ struct SinkThread {
     bytes_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
     batches_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pending_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SinkThread {
@@ -95,35 +151,66 @@ impl SinkThread {
             return;
         }
         let count = self.batch.len();
-        let body = format!("[{}]", self.batch.join(","));
-        self.batch.clear();
+        let queued_bytes: usize = self.batch.iter().map(String::len).sum();
+        let mut body = String::with_capacity(queued_bytes + count + 1);
+        body.push('[');
+        for (i, line) in self.batch.drain(..).enumerate() {
+            if i > 0 {
+                body.push(',');
+            }
+            body.push_str(&line);
+        }
+        body.push(']');
+        let remaining = self.deadline.remaining(
+            std::time::Duration::from_secs(self.timeout_secs.max(1))
+                .min(crate::sink_lifecycle::OP_LIMIT),
+        );
+        if remaining.is_zero() || self.last_err.is_some() {
+            self.last_err.get_or_insert_with(|| "HTTP sink aggregate drain deadline exceeded; buffered records were not delivered".into());
+            self.dec_pending(count);
+            self.pending_bytes
+                .fetch_sub(queued_bytes, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
         let Some(client) = &self.client else {
             self.last_err = Some("sink thread: blocking client unavailable".into());
             self.dec_pending(count);
+            self.pending_bytes
+                .fetch_sub(queued_bytes, std::sync::atomic::Ordering::SeqCst);
             return;
         };
         let len = body.len() as u64;
-        let mut sent = false;
-        for _ in 0..2 {
-            let mut req = client
-                .post(&self.url)
-                .header("content-type", "application/json")
-                .body(body.clone());
-            if let Some(a) = &self.auth {
-                req = req.header("authorization", a.clone());
-            }
-            match req.send() {
-                Ok(r) if r.status().is_success() => {
-                    sent = true;
-                    break;
-                }
-                Ok(r) => {
-                    self.last_err = Some(format!("sink POST {} returned {}", self.url, r.status()))
-                }
-                Err(e) => self.last_err = Some(format!("sink POST {} failed: {e}", self.url)),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(120));
+        let mut req = client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .timeout(remaining)
+            .body(body);
+        if let Some(a) = &self.auth {
+            req = req.header("authorization", a.clone());
         }
+        let sent = match req.send() {
+            Ok(r) if r.status().is_success() => true,
+            Ok(r) => {
+                self.last_err.get_or_insert_with(|| {
+                    format!(
+                        "sink POST {} returned {}",
+                        crate::config::redact_url_origin(&self.url),
+                        r.status()
+                    )
+                });
+                false
+            }
+            Err(e) => {
+                self.last_err.get_or_insert_with(|| {
+                    format!(
+                        "sink POST {} failed: {}",
+                        crate::config::redact_url_origin(&self.url),
+                        e.without_url()
+                    )
+                });
+                false
+            }
+        };
         if sent {
             self.batches_sent
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -132,11 +219,18 @@ impl SinkThread {
         }
         // Whether delivered or permanently failed, these are no longer buffered.
         self.dec_pending(count);
+        self.pending_bytes
+            .fetch_sub(queued_bytes, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn run(mut self, rx: std::sync::mpsc::Receiver<Cmd>) {
         self.client = match reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(self.timeout_secs.max(1)))
+            .timeout(
+                std::time::Duration::from_secs(self.timeout_secs.max(1))
+                    .min(crate::sink_lifecycle::OP_LIMIT),
+            )
+            .connect_timeout(crate::sink_lifecycle::OP_LIMIT)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent("harvest-sink/0.1")
             .build()
         {
@@ -156,11 +250,18 @@ impl SinkThread {
                 }
                 Ok(Cmd::Flush(ack)) => {
                     self.post();
-                    self.pending.store(0, std::sync::atomic::Ordering::SeqCst);
-                    let _ = ack.send(match self.last_err.take() {
-                        Some(e) => Err(anyhow::anyhow!(e)),
+                    let _ = ack.send(match &self.last_err {
+                        Some(e) => Err(anyhow::anyhow!(e.clone())),
                         None => Ok(()),
                     });
+                }
+                Ok(Cmd::Finish(ack)) => {
+                    self.post();
+                    let _ = ack.send(match &self.last_err {
+                        Some(e) => Err(anyhow::anyhow!(e.clone())),
+                        None => Ok(()),
+                    });
+                    break;
                 }
                 Ok(Cmd::Shutdown) | Err(_) => {
                     self.post();
@@ -183,12 +284,18 @@ impl HttpSink {
     ) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         let sink = Self {
+            worker: Mutex::new(None),
+            submit: Mutex::new(()),
+            closed: Default::default(),
+            deadline: Default::default(),
             tx,
             pending: Default::default(),
+            pending_bytes: Default::default(),
             bytes_sent: Default::default(),
             batches_sent: Default::default(),
         };
         let st = SinkThread {
+            deadline: sink.deadline.clone(),
             timeout_secs,
             url,
             auth,
@@ -199,11 +306,13 @@ impl HttpSink {
             bytes_sent: sink.bytes_sent.clone(),
             batches_sent: sink.batches_sent.clone(),
             pending: sink.pending.clone(),
+            pending_bytes: sink.pending_bytes.clone(),
         };
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("harvest-http-sink".into())
             .spawn(move || st.run(rx))
             .context("spawn sink thread")?;
+        *sink.worker.lock().unwrap_or_else(|p| p.into_inner()) = Some(worker);
         Ok(sink)
     }
 
@@ -214,28 +323,76 @@ impl HttpSink {
 
 impl Sink for HttpSink {
     fn write(&self, rec: &Record) -> Result<()> {
+        let _submit = self.submit.lock().unwrap_or_else(|p| p.into_inner());
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("HTTP sink is closed");
+        }
         let line = serde_json::to_string(rec)?;
-        self.pending
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.tx
-            .send(Cmd::Push(line))
-            .map_err(|_| anyhow::anyhow!("sink thread gone"))
+        let n = line.len();
+        reserve_buffer(&self.pending, &self.pending_bytes, n)?;
+        if self.tx.send(Cmd::Push(line)).is_err() {
+            self.pending
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.pending_bytes
+                .fetch_sub(n, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("sink thread gone");
+        }
+        Ok(())
     }
 
     fn flush(&self) -> Result<()> {
-        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        self.tx
-            .send(Cmd::Flush(ack_tx))
-            .map_err(|_| anyhow::anyhow!("sink thread gone"))?;
-        ack_rx
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .map_err(|e| anyhow::anyhow!("sink flush ack lost: {e}"))?
+        let _submit = self.submit.lock().unwrap_or_else(|p| p.into_inner());
+        self.deadline.begin();
+        let result = (|| {
+            let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+            self.tx
+                .send(Cmd::Flush(ack_tx))
+                .map_err(|_| anyhow::anyhow!("sink thread gone"))?;
+            ack_rx
+                .recv_timeout(
+                    crate::sink_lifecycle::DRAIN_LIMIT + std::time::Duration::from_secs(1),
+                )
+                .map_err(|_| anyhow::anyhow!("sink flush acknowledgement deadline exceeded"))?
+        })();
+        self.deadline.end();
+        result
+    }
+    fn finish(&self) -> Result<()> {
+        let _submit = self.submit.lock().unwrap_or_else(|p| p.into_inner());
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.deadline.begin();
+        let result = (|| {
+            let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+            self.tx
+                .send(Cmd::Finish(ack_tx))
+                .map_err(|_| anyhow::anyhow!("sink thread gone"))?;
+            ack_rx
+                .recv_timeout(
+                    crate::sink_lifecycle::DRAIN_LIMIT + std::time::Duration::from_secs(1),
+                )
+                .map_err(|_| anyhow::anyhow!("sink finish acknowledgement deadline exceeded"))?
+        })();
+        if let Some(worker) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("HTTP sink worker panicked"))?;
+        }
+        result
     }
 }
 
 impl Drop for HttpSink {
     fn drop(&mut self) {
+        self.deadline.begin();
         let _ = self.tx.send(Cmd::Shutdown);
+        if let Some(worker) = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -252,7 +409,7 @@ type PartFiles = std::collections::HashMap<String, (PathBuf, File)>;
 
 impl DatasetSink {
     fn open(dir: PathBuf, partition: &str) -> Result<Self> {
-        std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+        ensure_output_directory(&dir)?;
         Ok(Self {
             dir,
             by_day: partition == "day",
@@ -271,15 +428,15 @@ impl DatasetSink {
         let mut g = self.files.lock().unwrap_or_else(|p| p.into_inner());
         if !g.contains_key(&key) {
             let dir = self.dir.join(&key);
-            std::fs::create_dir_all(&dir)?;
+            ensure_output_directory(&dir)?;
             let n = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = dir.join(format!(
                 "part-{}-{}-{}.jsonl",
-                rec.run,
+                crate::document::safe_dataset_name(&rec.run),
                 std::process::id(),
                 n
             ));
-            let f = OpenOptions::new().create(true).append(true).open(&path)?;
+            let f = crate::fsutil::open_append(&path)?;
             g.insert(key.clone(), (path, f));
         }
         Ok((g, key))
@@ -376,10 +533,8 @@ pub struct JsonlSink {
 
 impl JsonlSink {
     fn open(path: &Path) -> Result<Self> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p).with_context(|| format!("mkdir {}", p.display()))?;
-        }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        ensure_output_parent(path)?;
+        let file = crate::fsutil::open_append(path)?;
         Ok(Self {
             file: Mutex::new(file),
         })
@@ -401,89 +556,177 @@ impl Sink for JsonlSink {
 }
 
 pub struct CsvSink {
-    file: Mutex<(File, bool)>,
+    file: Mutex<CsvState>,
+}
+
+struct CsvState {
+    writer: csv::Writer<File>,
+    keys: Option<Vec<String>>,
+    header_done: bool,
+}
+
+const CSV_META: [&str; 7] = [
+    "run",
+    "target",
+    "url",
+    "depth",
+    "ts",
+    "fingerprint",
+    "egress",
+];
+
+fn validate_csv_keys(keys: &[String]) -> Result<()> {
+    if keys.len() > 1024 {
+        anyhow::bail!("CSV supports at most 1024 data columns; use JSONL or split the schema");
+    }
+    let mut encoded = std::collections::BTreeSet::new();
+    for key in keys {
+        if key.is_empty()
+            || key.len() > 256
+            || !encoded.insert(crate::export::spreadsheet_text(key))
+        {
+            anyhow::bail!("CSV field headings are empty, oversized or collide after formula protection; rename fields or use JSONL");
+        }
+    }
+    Ok(())
 }
 
 impl CsvSink {
     fn open(path: &Path) -> Result<Self> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p).with_context(|| format!("mkdir {}", p.display()))?;
+        Self::open_with_fields(path, None)
+    }
+
+    fn open_with_fields(path: &Path, configured: Option<Vec<String>>) -> Result<Self> {
+        if let Some(keys) = &configured {
+            validate_csv_keys(keys)?;
         }
-        let exists = path.exists()
-            && std::fs::metadata(path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false);
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        ensure_output_parent(path)?;
+        let exists = path.exists() && std::fs::metadata(path)?.len() > 0;
+        let keys = if exists {
+            let file = crate::fsutil::open_append(path)?;
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .from_reader(crate::source_io::CappedReader::new(file, 1024 * 1024));
+            let header = reader.records().next().context("CSV has no header")??;
+            if header.len() < CSV_META.len() || !header.iter().take(7).eq(CSV_META) {
+                anyhow::bail!("existing CSV header is not a harvest schema");
+            }
+            let keys: Vec<String> = header.iter().skip(7).map(String::from).collect();
+            validate_csv_keys(&keys)?;
+            if configured.as_ref().is_some_and(|want| {
+                want.iter()
+                    .any(|k| !keys.contains(&crate::export::spreadsheet_text(k)))
+            }) {
+                anyhow::bail!(
+                    "CSV schema changed: use a new output file or JSONL followed by export"
+                );
+            }
+            // Formula-neutralized field names are recovered from the known
+            // configuration, not guessed. Ordinary field names are unchanged.
+            if let Some(want) = configured {
+                Some(
+                    keys.iter()
+                        .map(|k| {
+                            want.iter()
+                                .find(|w| crate::export::spreadsheet_text(w) == *k)
+                                .cloned()
+                                .unwrap_or_else(|| k.clone())
+                        })
+                        .collect(),
+                )
+            } else {
+                Some(keys)
+            }
+        } else {
+            configured
+        };
+        let file = crate::fsutil::open_append(path)?;
         Ok(Self {
-            file: Mutex::new((file, exists)),
+            file: Mutex::new(CsvState {
+                writer: csv::WriterBuilder::new().from_writer(file),
+                keys,
+                header_done: exists,
+            }),
         })
     }
 }
 
 fn json_flat(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => crate::export::spreadsheet_text(s),
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
 }
 
+#[cfg(test)]
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
+    crate::export::csv_escape(s)
 }
 
 impl Sink for CsvSink {
     fn write(&self, rec: &Record) -> Result<()> {
         let mut g = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        let (f, header_done) = &mut *g;
-        let keys: Vec<String> = rec.fields.keys().cloned().collect();
-        if !*header_done {
-            let mut header = vec![
-                "run",
-                "target",
-                "url",
-                "depth",
-                "ts",
-                "fingerprint",
-                "egress",
-            ];
-            header.extend(keys.iter().map(String::as_str));
-            let line = header
-                .iter()
-                .map(|h| csv_escape(h))
-                .collect::<Vec<_>>()
-                .join(",");
-            writeln!(f, "{line}")?;
-            *header_done = true;
+        let keys = g
+            .keys
+            .get_or_insert_with(|| rec.fields.keys().cloned().collect())
+            .clone();
+        if rec.fields.keys().any(|k| !keys.contains(k)) {
+            anyhow::bail!("CSV schema changed: refusing an unaligned row; use JSONL + export or a new CSV file");
         }
+        validate_csv_keys(&keys)?;
+        if !g.header_done {
+            let mut header: Vec<String> = CSV_META.iter().map(|s| s.to_string()).collect();
+            header.extend(keys.iter().map(|k| crate::export::spreadsheet_text(k)));
+            g.writer.write_record(header)?;
+            g.header_done = true;
+        }
+        let text = crate::export::spreadsheet_text;
         let mut row = vec![
-            rec.run.clone(),
-            rec.target.clone(),
-            rec.url.clone(),
+            text(&rec.run),
+            text(&rec.target),
+            text(&rec.url),
             rec.depth.to_string(),
             rec.ts.to_string(),
-            rec.fingerprint.clone(),
-            rec.egress.clone(),
+            text(&rec.fingerprint),
+            text(&rec.egress),
         ];
-        for k in &keys {
-            row.push(json_flat(&rec.fields[k]));
-        }
-        let line = row
-            .iter()
-            .map(|s| csv_escape(s))
-            .collect::<Vec<_>>()
-            .join(",");
-        writeln!(f, "{line}")?;
+        row.extend(
+            keys.iter()
+                .map(|k| rec.fields.get(k).map(json_flat).unwrap_or_default()),
+        );
+        g.writer.write_record(row)?;
         Ok(())
     }
     fn flush(&self) -> Result<()> {
-        let mut g = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        g.0.flush()?;
+        self.file
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .writer
+            .flush()?;
         Ok(())
+    }
+}
+
+/// Config-aware CSV schema: declare the union once, before any worker writes.
+pub(crate) fn build_for_targets(
+    cfg: &SinkCfg,
+    targets: &[crate::config::TargetCfg],
+) -> Result<(std::sync::Arc<dyn Sink>, PathBuf)> {
+    if let SinkCfg::Csv { path } = cfg {
+        let fields: std::collections::BTreeSet<String> = targets
+            .iter()
+            .flat_map(|t| t.extract.keys().cloned())
+            .collect();
+        Ok((
+            std::sync::Arc::new(CsvSink::open_with_fields(
+                path,
+                Some(fields.into_iter().collect()),
+            )?),
+            path.clone(),
+        ))
+    } else {
+        build(cfg)
     }
 }
 
@@ -495,11 +738,26 @@ pub struct SqliteSink {
 #[cfg(feature = "sqlite")]
 impl SqliteSink {
     fn open(path: &Path) -> Result<Self> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let conn = rusqlite::Connection::open(path)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        ensure_output_directory(parent)?;
+        // Pin/check the final database entry with the same no-follow and
+        // hard-link policy as the file sinks before SQLite resolves it by
+        // pathname. SQLite's own NOFOLLOW flag below closes the final-link
+        // race for the database file itself.
+        crate::fsutil::reject_sqlite_sidecars(path)?;
+        let database_guard = crate::fsutil::open_append(path)?;
+        drop(database_guard);
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        crate::fsutil::reject_sqlite_sidecars(path)?;
         conn.execute_batch(
             r#"CREATE TABLE IF NOT EXISTS records (
                  id INTEGER PRIMARY KEY,
@@ -522,6 +780,17 @@ impl SqliteSink {
 
 #[cfg(feature = "sqlite")]
 impl Sink for SqliteSink {
+    fn flush(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let (busy, _, _): (i64, i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 {
+            anyhow::bail!("SQLite checkpoint busy; a complete snapshot cannot be promised");
+        }
+        Ok(())
+    }
     fn write(&self, rec: &Record) -> Result<()> {
         let payload = serde_json::to_string(&rec.fields)?;
         let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());

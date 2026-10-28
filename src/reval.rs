@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 /// must not turn the store into a memory hog. Above the cap, a 304 replays
 /// only the first `LINK_CAP` links — acceptable, documented.
 pub const LINK_CAP: usize = 500;
+const MAX_REVALIDATION_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UrlState {
@@ -65,8 +66,9 @@ impl Store {
     pub fn load(path: PathBuf, ttl_secs: u64) -> Result<Self> {
         let mut map = HashMap::new();
         if path.exists() {
-            let txt = std::fs::read_to_string(&path)
+            let bytes = crate::fsutil::read_bounded(&path, MAX_REVALIDATION_BYTES)
                 .with_context(|| format!("read validators {}", path.display()))?;
+            let txt = String::from_utf8(bytes).context("validators store is not UTF-8")?;
             for (i, line) in txt.lines().enumerate() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -193,15 +195,11 @@ impl Store {
             out.push('\n');
         }
         drop(g);
-        if let Some(p) = self.path.parent() {
-            std::fs::create_dir_all(p).ok();
+        if out.len() as u64 > MAX_REVALIDATION_BYTES {
+            anyhow::bail!("validators store exceeds the {MAX_REVALIDATION_BYTES}-byte limit");
         }
-        let tmp = self
-            .path
-            .with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("rename -> {}", self.path.display()))?;
+        crate::fsutil::write_private_atomic(&self.path, out.as_bytes())
+            .with_context(|| format!("write validators {}", self.path.display()))?;
         Ok(())
     }
 }

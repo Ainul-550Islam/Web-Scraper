@@ -1,9 +1,11 @@
-# One-click client deployment: engine + metrics + dashboards.
-# usage: docker compose -f ops/docker-compose.yml up -d
-#   config: drop your JSON config at ./ops/harvest/config.json (mounted read-only)
-#   secrets: reference them in the config as "${VAR}" — the engine expands
-#            whole-value ${VAR} references from this compose file's environment.
-#            Nothing is baked into any image or committed to the repo.
+# One-click client deployment: engine + console + metrics + dashboards.
+# usage: cp -n ops/harvest/config.example.json ops/harvest/config.json,
+#        edit the demo target, set HARVEST_ADMIN_TOKEN and
+#        GRAFANA_ADMIN_PASSWORD, then run `docker compose -f
+#        ops/docker-compose.yml up --build -d`.
+# The starter config binds 0.0.0.0:9678 inside the private Compose network,
+# uses /var/lib/harvest for writable state, and references the injected token.
+# Host ports below still bind only to 127.0.0.1. No secrets are committed.
 # DEV DEFAULTS BELOW BIND EVERYTHING TO 127.0.0.1 ON THE HOST. To serve a
 # network, front these with a TLS proxy or firewall on purpose — do not just
 # delete the "127.0.0.1:" prefixes and hope.
@@ -16,12 +18,10 @@ services:
       dockerfile: Dockerfile
     image: harvest-engine:latest
     restart: unless-stopped
-    # The engine drains gracefully on SIGINT (finish in-flight pages, flush
-    # sinks, land history/audit/checkpoint). docker stop sends SIGTERM,
-    # which the process does not catch — so ask for SIGINT and give the
-    # drain enough room (bounded by request_timeout_secs per page).
-    stop_signal: SIGINT
-    stop_grace_period: 120s
+    command: ["serve", "--config", "/etc/harvest/config.json"]
+    # Both SIGTERM and SIGINT are owned, cancellation-aware drains.
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
     volumes:
       - ./harvest/config.json:/etc/harvest/config.json:ro
       - harvest-data:/var/lib/harvest
@@ -31,7 +31,7 @@ services:
       RUST_LOG: "info,harvest=warn"
       # Example secret injection (config.json would contain "admin_token":
       # "${HARVEST_ADMIN_TOKEN}" etc). Generate: head -c24 /dev/urandom | base64
-      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:-}
+      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:?generate and set an admin token first}
     # fail closed: an admin API without a token on a non-loopback bind is a
     # startup error in the engine itself; keep 127.0.0.1 mapping for dev.
     read_only: true
@@ -68,12 +68,19 @@ services:
     image: prom/prometheus:v2.54.1
     restart: unless-stopped
     environment:
-      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:-}
+      HARVEST_ADMIN_TOKEN: ${HARVEST_ADMIN_TOKEN:?generate and set an admin token first}
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-entrypoint.sh:/etc/prometheus/entrypoint.sh:ro
       - prom-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"   # prometheus has NO auth — never expose raw
+    entrypoint: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=15d
@@ -82,11 +89,10 @@ services:
     image: grafana/grafana:11.2.0
     restart: unless-stopped
     environment:
-      # DEV-ONLY fallback. For any real deployment set
-      # GRAFANA_ADMIN_PASSWORD in your shell/.env before `up`:
-      #   printf 'export GRAFANA_ADMIN_PASSWORD=...' >> ops/.env (chmod 600)
+      # No password default: supply a unique secret in the shell or with
+      # `docker compose --env-file ops/.env ...` (keep that file mode 0600).
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-first-login}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set a unique Grafana admin password first}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:

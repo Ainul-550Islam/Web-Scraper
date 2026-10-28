@@ -16,6 +16,7 @@ import {
 } from "../../components/AppShell";
 import { CommandPalette, Toasts, useHotkeyPalette } from "../../components/Overlays";
 import { Skeleton } from "../../components/ui";
+import { PageErrorBoundary } from "../../components/PageErrorBoundary";
 import { PAGE_LOADERS } from "../routes";
 import { useRoute } from "../router";
 import { useConnection } from "../../lib/connection";
@@ -40,7 +41,9 @@ export default function App() {
       localStorage.setItem("harvest.console.nav", collapsed ? "collapsed" : "expanded");
     } catch { /* storage optional */ }
   }, [collapsed]);
-  const [mobileNav, setMobileNav] = useState(false);
+  const [mobileNavState, setMobileNavState] = useState<{ path: string; open: boolean }>({ path: route.path, open: false });
+  const mobileNav = mobileNavState.open && mobileNavState.path === route.path;
+  const closeMobileNav = () => setMobileNavState({ path: route.path, open: false });
   const [welcomeHidden, setWelcomeHidden] = useState(() => tourDismissed());
   const [tourOpen, setTourOpen] = useState(false);
   const palette = useHotkeyPalette();
@@ -75,9 +78,6 @@ export default function App() {
     [conn, toggleTheme],
   );
 
-  // mobile nav closes on route change
-  useEffect(() => setMobileNav(false), [route.path]);
-
   // §29 g-sequences (disabled while the palette owns the keyboard)
   useShortcuts(!palette.open);
 
@@ -108,12 +108,12 @@ export default function App() {
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((v) => !v)}
         mobileOpen={mobileNav}
-        onCloseMobile={() => setMobileNav(false)}
+        onCloseMobile={closeMobileNav}
       />
       <TopBar
         route={route}
         onOpenPalette={() => palette.setOpen(true)}
-        onOpenMobileNav={() => setMobileNav(true)}
+        onOpenMobileNav={() => setMobileNavState({ path: route.path, open: true })}
       />
       <main className="main" id="main" tabIndex={-1}>
         <Page>
@@ -131,6 +131,7 @@ export default function App() {
               />
             </div>
           )}
+          <PageErrorBoundary key={route.path}>
           <Suspense
             fallback={
               <div style={{ display: "grid", gap: 12, marginTop: 8 }}>
@@ -144,11 +145,12 @@ export default function App() {
           >
             <PageComp />
           </Suspense>
+          </PageErrorBoundary>
         </Page>
       </main>
       <StatusBar route={route} />
       <Toasts />
-      <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
+      {tourOpen && <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />}
       {palette.open && (
         <CommandPalette items={paletteItems} onClose={() => palette.setOpen(false)} />
       )}

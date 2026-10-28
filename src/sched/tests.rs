@@ -18,6 +18,24 @@ fn job(u: &str, target: usize) -> Job {
 }
 
 #[test]
+fn requeue_preserves_admitted_work_when_waiting_queue_is_full() {
+    let q = CrawlQueue::new(&cfg("fifo", 1, 0), 1);
+    let first = job("http://x/first", 0);
+    let second = job("http://x/second", 0);
+    q.push(first.clone()).unwrap();
+    let Popped::Job(popped) = q.pop() else {
+        panic!("first job should be popped");
+    };
+    q.push(second.clone()).unwrap();
+    assert_eq!(q.push(job("http://x/third", 0)), Err(PushError::Full));
+
+    q.requeue(popped.clone()).unwrap();
+    assert_eq!(q.len(), 2, "requeue may briefly exceed the intake cap");
+    assert_eq!(q.pending_snapshot()[0].0, "http://x/second");
+    assert_eq!(q.pending_snapshot()[1].0, "http://x/first");
+}
+
+#[test]
 fn fifo_preserves_exact_insertion_order() {
     let q = CrawlQueue::new(&cfg("fifo", 0, 0), 1);
     for i in 0..5 {
@@ -59,6 +77,20 @@ fn priority_drains_high_first_fifo_within_class() {
         order,
         vec!["http://x/hi1", "http://x/hi2", "http://x/n1", "http://x/lo"]
     );
+}
+
+#[test]
+fn invalid_target_is_rejected_before_fair_queue_indexing() {
+    let q = CrawlQueue::new(&cfg("fair", 0, 0), 2);
+    assert_eq!(
+        q.push(job("http://x/out-of-range", 2)),
+        Err(PushError::InvalidTarget)
+    );
+    assert!(matches!(q.pop(), Popped::Empty));
+    let stats = q.stats();
+    assert_eq!(stats.pushed, 0);
+    assert_eq!(stats.rejected, 1);
+    assert_eq!(stats.depth, 0);
 }
 
 #[test]

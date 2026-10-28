@@ -8,11 +8,8 @@
 import { describe, expect, it } from "vitest";
 
 
-// node fs via dynamic import keeps the web tsconfig (DOM-only) happy
- 
-const readFileSync: (p: string | URL, enc?: string) => string =
-  // @ts-expect-error provided by vitest's node environment
-  (await import("node:fs")).readFileSync;
+// Node types are available to test files. Always request UTF-8 explicitly.
+const { readFileSync } = await import("node:fs");
 const cssRaw = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
 /** Resolve `@import "./x.css";` chains so layered stylesheets read as one file. */
 const css = (rel: string): string => {

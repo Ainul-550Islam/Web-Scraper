@@ -501,7 +501,7 @@ async fn run(cli: Cli) -> Result<()> {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_sig = stop.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = shutdown_signal().await;
                 tracing::warn!("stop requested — worker will finish the current job and exit");
                 stop_sig.store(true, std::sync::atomic::Ordering::Relaxed);
             });
@@ -1439,12 +1439,13 @@ async fn run(cli: Cli) -> Result<()> {
             if let Some(mp) = max_pages {
                 cfg.max_pages = mp;
             }
+            cfg.validate().context("config invalid after overrides")?;
             // Graceful drain: ctrl-c stops link discovery + queueing, workers
             // finish in-flight requests, partial results are flushed to disk.
             let stop = Arc::new(AtomicBool::new(false));
             let stop_sig = stop.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = shutdown_signal().await;
                 tracing::warn!(
                     "stop requested — finishing in-flight requests, then writing results"
                 );
@@ -1504,7 +1505,7 @@ async fn run(cli: Cli) -> Result<()> {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_sig = stop.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = shutdown_signal().await;
                 tracing::warn!("stop requested — finishing current run, then exiting");
                 stop_sig.store(true, std::sync::atomic::Ordering::Relaxed);
             });
@@ -1544,4 +1545,19 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Ctrl-C and the standard service/container termination signal share the
+/// same drain flag. Registration failures are errors, not a fake stop.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

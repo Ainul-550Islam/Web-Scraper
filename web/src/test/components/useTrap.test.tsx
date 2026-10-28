@@ -2,9 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render } from "@testing-library/react";
 import { useTrap } from "../../components/Overlays/useTrap";
 
-function TrapProbe({ onClose, onRef }: { onClose: () => void; onRef?: (el: HTMLDivElement | null) => void }) {
+function TrapProbe({ onClose }: { onClose: () => void }) {
   const ref = useTrap(onClose);
-  onRef?.(ref.current);
   return (
     <div ref={ref} tabIndex={-1}>
       <button id="a">A</button>

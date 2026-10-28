@@ -37,6 +37,60 @@ impl Extractor {
         Ok(Self { fields })
     }
 
+    pub fn extract_bounded(&self, doc: &Html) -> anyhow::Result<Map<String, Value>> {
+        if self.fields.len() > 1024 {
+            anyhow::bail!("extractor exceeds 1024 fields");
+        }
+        let mut out = Map::new();
+        let mut total = 0usize;
+        for (name, c) in &self.fields {
+            let mut vals = Vec::new();
+            for el in doc.select(&c.selector) {
+                if vals.len() >= 4096 {
+                    anyhow::bail!("field exceeds 4096 matches; use a narrower selector");
+                }
+                let mut raw = String::new();
+                if let Some(attr) = &c.attr {
+                    if let Some(v) = el.value().attr(attr) {
+                        if v.len() > 1024 * 1024 {
+                            anyhow::bail!("extracted field exceeds 1 MiB");
+                        }
+                        raw.push_str(v.trim());
+                    }
+                } else {
+                    for text in el.text() {
+                        if raw.len().saturating_add(text.len()) > 1024 * 1024 {
+                            anyhow::bail!("extracted field exceeds 1 MiB");
+                        }
+                        raw.push_str(text);
+                    }
+                    raw = collapse_ws(&raw);
+                }
+                total = total.saturating_add(raw.len() + name.len());
+                if total > 8 * 1024 * 1024 {
+                    anyhow::bail!("extracted record exceeds 8 MiB");
+                }
+                if !raw.is_empty() {
+                    vals.push(Value::String(raw));
+                }
+                if !c.all {
+                    break;
+                }
+            }
+            out.insert(
+                name.clone(),
+                if vals.is_empty() {
+                    Value::Null
+                } else if c.all {
+                    Value::Array(vals)
+                } else {
+                    vals.remove(0)
+                },
+            );
+        }
+        Ok(out)
+    }
+
     pub fn extract(&self, doc: &Html) -> Map<String, Value> {
         let mut out = Map::new();
         for (name, c) in &self.fields {
@@ -72,7 +126,14 @@ impl Extractor {
 
 /// Collapse all Unicode whitespace (incl. NBSP) runs into single spaces.
 pub fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::new();
+    for word in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 /// Normalize visible text (collapse whitespace) then hash. Two identical
@@ -242,6 +303,34 @@ impl JsonExtractor {
 
     /// Native JSON types are preserved (numbers stay numbers, bools stay
     /// bools) — unlike CSS text extraction, no string coercion.
+    pub fn extract_bounded(&self, doc: &Value) -> anyhow::Result<Map<String, Value>> {
+        let mut budget = CountBytes(8 * 1024 * 1024);
+        let mut out = Map::new();
+        for (name, field) in &self.fields {
+            let hits = query_path(doc, &field.steps);
+            if hits.len() > 4096 {
+                anyhow::bail!("JSON field exceeds 4096 matches");
+            }
+            let picked: Vec<&Value> = if field.all {
+                hits
+            } else {
+                hits.into_iter().take(1).collect()
+            };
+            for v in &picked {
+                serde_json::to_writer(&mut budget, v)
+                    .map_err(|_| anyhow::anyhow!("JSON record exceeds 8 MiB"))?;
+            }
+            let v = if picked.is_empty() {
+                Value::Null
+            } else if field.all {
+                Value::Array(picked.into_iter().cloned().collect())
+            } else {
+                picked[0].clone()
+            };
+            out.insert(name.clone(), v);
+        }
+        Ok(out)
+    }
     pub fn extract(&self, doc: &Value) -> Map<String, Value> {
         let mut out = Map::new();
         for (name, f) in &self.fields {
@@ -257,4 +346,38 @@ impl JsonExtractor {
         }
         out
     }
+}
+
+struct CountBytes(usize);
+impl std::io::Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.0 {
+            return Err(std::io::Error::other("record byte budget exceeded"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+pub(crate) fn guard_html(body: &str) -> anyhow::Result<()> {
+    if body.bytes().filter(|b| *b == b'<').take(100_001).count() > 100_000 {
+        anyhow::bail!("HTML exceeds the 100000-tag complexity cap");
+    }
+    Ok(())
+}
+pub(crate) fn fingerprint_json(body: &str) -> anyhow::Result<String> {
+    let value: Value = serde_json::from_str(body)?;
+    let bytes = serde_json::to_vec(&value)?;
+    let hash = Sha256::digest(bytes);
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+}
+pub(crate) fn links_bounded(doc: &Html, selector: &Selector, cap: usize) -> Vec<String> {
+    doc.select(selector)
+        .filter_map(|el| el.value().attr("href"))
+        .filter(|href| href.len() <= 8192)
+        .take(cap.min(100_000))
+        .map(str::to_string)
+        .collect()
 }

@@ -6,15 +6,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import ControlJobs from "../pages/ControlJobs";
-import CommandComposer, {
+import CommandComposer from "../components/patterns/CommandComposer";
+import {
   buildCommand,
   emptyDraft,
   validateCommand,
   CEILINGS,
-} from "../components/patterns/CommandComposer";
-import { canCancel, isTerminal, jobBlurb } from "../components/patterns/JobStateBadge";
+} from "../components/patterns/CommandComposer.model";
+import { canCancel, isTerminal, jobBlurb } from "../components/patterns/JobState.model";
 import { mountPage, CONTROL_FIXTURE_IDS } from "./harness";
-import { ApiError } from "../lib/api";
+import { ApiError, commandIdempotencyKey } from "../lib/api";
 
 describe("job state vocabulary", () => {
   it("treats only the three terminal states as terminal", () => {
@@ -65,6 +66,34 @@ describe("command composer", () => {
     });
   });
 
+  it("builds bounded inline fields instead of submitting an empty source", () => {
+    const ai = emptyDraft("ai");
+    if (ai.op !== "ai") throw new Error("fixture drift");
+    ai.ai.source_kind = "inline";
+    expect(validateCommand(ai).map((issue) => issue.field)).toContain("source.fields");
+
+    ai.ai.inline_fields = [{ name: "price", value: "$19.99", deterministic: "19.99" }];
+    expect(buildCommand(ai)).toMatchObject({
+      source: {
+        kind: "inline",
+        fields: [{ name: "price", value: "$19.99", deterministic: "19.99" }],
+      },
+    });
+    expect(validateCommand(ai)).toHaveLength(0);
+
+    ai.ai.inline_fields[0]!.name = "  ";
+    expect(validateCommand(ai).map((issue) => issue.field)).toContain("source.fields[0].name");
+    ai.ai.inline_fields[0]!.name = "price";
+    ai.ai.inline_fields[0]!.value = "é".repeat(2_049);
+    expect(validateCommand(ai).map((issue) => issue.field)).toContain("source.fields[0].value");
+    ai.ai.inline_fields = Array.from({ length: 20 }, (_, index) => ({
+      name: `field-${index}`,
+      value: "x".repeat(4_096),
+      deterministic: "",
+    }));
+    expect(validateCommand(ai).map((issue) => issue.field)).toContain("command");
+  });
+
   it("refuses the same ceilings the server refuses", () => {
     const draft = emptyDraft("crawl", ["demo-catalog"]);
     if (draft.op !== "crawl") throw new Error("fixture drift");
@@ -86,6 +115,14 @@ describe("command composer", () => {
     for (const banned of ["token", "api_key", "secret", "/home/", "/tmp/", ".."]) {
       expect(body).not.toContain(banned);
     }
+  });
+
+  it("keeps an idempotency key stable for retries and changes it for a new submission nonce", () => {
+    const body = buildCommand(emptyDraft("export"));
+    const first = commandIdempotencyKey("export", body, "nonce-one");
+    expect(commandIdempotencyKey("export", body, "nonce-one")).toBe(first);
+    expect(commandIdempotencyKey("export", body, "nonce-two")).not.toBe(first);
+    expect(commandIdempotencyKey("export", { ...body, dataset: "other" }, "nonce-one")).not.toBe(first);
   });
 });
 

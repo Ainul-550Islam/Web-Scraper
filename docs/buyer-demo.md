@@ -5,8 +5,9 @@ external services. Every section states what to run and what you should see.
 Nothing here cites metrics the repo cannot produce on your machine — where a
 number matters, the command that prints it is given instead.
 
-Prereq: Linux/macOS, Rust stable (1.75+), Node 20+, Python 3. Paths are
-relative to the repo root unless stated. `out/`, `web/dist/`,
+Prereq: Linux/macOS, Rust 1.88.0 via rustup (pinned in
+`rust-toolchain.toml`), Node 22.12+ or 24 (24 is the reference), and Python
+3. Paths are relative to the repo root unless stated. `out/`, `web/dist/`,
 `web/node_modules/` are generated and gitignored.
 
 ---
@@ -148,15 +149,19 @@ Per lane (sink/checkpoint/quarantine/history): configured path, exists?,
 bytes. The console's Storage page and Overview's STORAGE group render exactly
 this — no lane is shown as healthy that the engine did not report.
 
-## O. Alerts — one of only two mutations
+## O. Alerts — one of six admin mutations
 
 ```sh
 curl -s localhost:9678/alerts | python3 -m json.tool | head
 curl -s -X POST "localhost:9678/alerts/ack?event=<id>"   # ack an alert
 ```
 Alert rules fire from config thresholds; delivery is logged (`notified`).
-`/alerts/ack` and `/ops/note` are the **only** POST routes; everything else
-405s with a message that says so.
+`/alerts/ack` and `/ops/note` are the two operator-action POST routes. The
+four bounded control-plane POSTs are `/control/crawl`,
+`/control/export`, `/control/ai`, and `/control/jobs/:id/cancel`. The route
+contract test pins exactly these six POST paths; when `admin_token` is
+configured all require its bearer token, and tokenless access is loopback-only.
+Unsupported mutations return 405.
 
 ## P. Ops notes — the other mutation
 

@@ -18,7 +18,9 @@ Anti-drift contract (both directions, so the page cannot rot):
 
 1. `tests/route_contract.rs` parses admin.rs and the manifest and fails on
    any add/remove/rename; it also pins the auth rule (`/health` + `/live`
-   open) and the fact that POST exists only for `/alerts/ack` and `/ops/note`.
+   open) and exactly six POST routes: `/alerts/ack`, `/ops/note`,
+   `/control/crawl`, `/control/export`, `/control/ai`, and
+   `/control/jobs/:id/cancel`.
 2. `web/src/test/contract/api-explorer.test.ts` walks all console sources and
    fails if any `apiGet/apiPost` path is missing from the manifest, checks
    auth-column consistency, and requires every `doc` file to exist.

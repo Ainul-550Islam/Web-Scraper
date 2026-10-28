@@ -21,6 +21,19 @@ fn counters_move_with_lifecycle() {
 }
 
 #[test]
+fn deferred_jobs_release_worker_capacity_without_counting_as_finished() {
+    let a = Accounting::new();
+    a.note_submit();
+    a.note_start();
+    a.note_deferred();
+    let snapshot = a.snapshot();
+    assert_eq!(snapshot.jobs_active, 0);
+    assert_eq!(snapshot.jobs_completed, 0);
+    assert_eq!(snapshot.jobs_failed, 0);
+    assert_eq!(snapshot.jobs_submitted, 1);
+}
+
+#[test]
 fn failure_ring_bounded_newest_wins() {
     let a = Accounting::new();
     for i in 0..(FAILURE_RING_CAP + 40) {

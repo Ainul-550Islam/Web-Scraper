@@ -230,3 +230,86 @@ fn jsonl_sink_creates_parent_dirs() {
     assert_eq!(txt.lines().count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn audit_csv_header_stays_aligned_for_different_targets_and_reopen() {
+    let dir = std::env::temp_dir().join(format!("harvest-audit-csv-{}", std::process::id()));
+    let p = dir.join("out.csv");
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = CsvSink::open(&p).unwrap();
+    let mut first = rec("a", "A");
+    first.fields.insert("b".into(), serde_json::json!("B"));
+    s.write(&first).unwrap();
+    s.write(&rec("b", "second B")).unwrap();
+    s.flush().unwrap();
+    drop(s);
+    let s = CsvSink::open(&p).unwrap();
+    s.write(&rec("b", "third B")).unwrap();
+    s.flush().unwrap();
+    let text = std::fs::read_to_string(&p).unwrap();
+    let mut rows = csv::Reader::from_reader(text.as_bytes());
+    let records: Vec<_> = rows.records().map(Result::unwrap).collect();
+    assert_eq!(&records[1][7], "");
+    assert_eq!(&records[1][8], "second B");
+    assert_eq!(&records[2][8], "third B");
+    assert!(s
+        .write(&rec("new-column", "refuse, never corrupt"))
+        .is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn audit_csv_quotes_carriage_returns_and_neutralizes_formulas() {
+    assert_eq!(csv_escape("a\rb"), "\"a\rb\"");
+    assert_eq!(
+        crate::export::spreadsheet_text("=HYPERLINK(\"https://evil.test\")"),
+        "'=HYPERLINK(\"https://evil.test\")"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_jsonl_output_cannot_append_through_a_symlink() {
+    let t = std::env::temp_dir().join(format!("harvest-phase2-sink-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&t);
+    std::fs::create_dir_all(&t).unwrap();
+    let original = t.join("private");
+    std::fs::write(&original, b"keep").unwrap();
+    let link = t.join("output.jsonl");
+    std::os::unix::fs::symlink(&original, &link).unwrap();
+    assert!(
+        JsonlSink::open(&link).is_err(),
+        "output must not adopt a symlinked file"
+    );
+    assert_eq!(std::fs::read(original).unwrap(), b"keep");
+    std::fs::remove_dir_all(t).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_sink_creation_rejects_a_symlinked_parent_before_making_directories() {
+    let t = std::env::temp_dir().join(format!("harvest-phase2-parent-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&t);
+    std::fs::create_dir_all(t.join("real")).unwrap();
+    let alias = t.join("alias");
+    std::os::unix::fs::symlink(t.join("real"), &alias).unwrap();
+    let output = alias.join("nested/output.jsonl");
+    assert!(JsonlSink::open(&output).is_err());
+    assert!(!t.join("real/nested").exists());
+    std::fs::remove_dir_all(t).unwrap();
+}
+
+#[test]
+fn phase2_csv_schema_refuses_formula_protected_header_collisions() {
+    let t = std::env::temp_dir().join(format!(
+        "harvest-phase2-csv-alias-{}.csv",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&t);
+    let result = CsvSink::open_with_fields(&t, Some(vec!["=price".into(), "'=price".into()]));
+    assert!(
+        result.is_err(),
+        "two logical keys must not silently share one protected CSV heading"
+    );
+    let _ = std::fs::remove_file(t);
+}

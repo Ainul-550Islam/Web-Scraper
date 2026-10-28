@@ -1,6 +1,6 @@
 // CommandPalette — split from Overlays.tsx; barrel re-exports keep every public path & name
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useTrap } from "./useTrap";
 import type { PaletteItem } from "./PaletteItem";
 
@@ -24,7 +24,6 @@ export function CommandPalette({
     );
   }, [items, q])();
 
-  useEffect(() => setActive(0), [q]);
 
   const ref = useTrap(onClose);
 
@@ -39,7 +38,7 @@ export function CommandPalette({
           placeholder="Jump to a page, run an action, or search loaded records…"
           aria-label="Command search"
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => { setQ(e.target.value); setActive(0); }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(filtered.length - 1, a + 1)); }
             if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); }

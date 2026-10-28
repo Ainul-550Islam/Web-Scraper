@@ -100,29 +100,35 @@ curl -s http://127.0.0.1:9678/metrics | head
 curl -s http://127.0.0.1:9678/recent | head -c 400
 ```
 
-## Deployment (Docker + Prometheus + Grafana)
+## Deployment (Docker + console + Prometheus + Grafana)
 
-`ops/docker-compose.yml` runs the hardened container: non-root (uid 10001),
-read-only rootfs, all capabilities dropped, a `/health`-based Docker
-HEALTHCHECK (no curl in the image — the probe uses the admin server itself),
-and host ports bound to `127.0.0.1` by default. Secrets come from the host
-environment (`${VAR}` references in the mounted config) — the image and the
-repo carry none. The Grafana admin password baked into compose is an
-explicit DEV placeholder; override `GRAFANA_ADMIN_PASSWORD` (and set
-`HARVEST_ADMIN_TOKEN` alongside a non-loopback `metrics_addr`) before real
-use. See **SECURITY.md** for the full production checklist and the list of
-startup-time rejections (open admin binds, traversal paths, unbounded
-retry/timeout/size settings).
+`ops/docker-compose.yml` runs the hardened stack: non-root engine (uid
+10001), read-only root filesystems, dropped capabilities, health checks, and
+host ports bound to `127.0.0.1` by default. Start from
+`ops/harvest/config.example.json` for Compose: it binds the admin listener to
+`0.0.0.0:9678` **inside the Compose network**, requires the injected
+`${HARVEST_ADMIN_TOKEN}`, and stores writable state under `/var/lib/harvest`.
+The published host ports remain loopback-only; do not remove the `127.0.0.1:`
+prefixes without designing an authenticated TLS front end. Secrets are
+provided through the host environment and are not baked into either image.
+Grafana has no hard-coded password: `GRAFANA_ADMIN_PASSWORD` is mandatory.
+See **SECURITY.md** for the full production checklist and startup-time
+rejections (open admin binds, traversal paths, unbounded retry/timeout/size
+settings).
 
-Two operational facts with teeth: graceful shutdown is wired to **SIGINT**
-(Ctrl-C) only — compose therefore sets `stop_signal: SIGINT`; and every
-admin route except `/health` requires the bearer token once one is
-configured. Full guide: [docs/deployment.md](docs/deployment.md).
+The engine drains on both **SIGINT** and **SIGTERM**; Compose sends SIGTERM
+and allows 45 seconds. `/health` and `/live` are the only unauthenticated
+admin probes; other admin routes require the bearer token when configured.
+Full guide: [docs/deployment.md](docs/deployment.md).
 
 ```bash
-cp config.example.json ops/harvest/config.json   # edit: your authorized sources
+cp -n ops/harvest/config.example.json ops/harvest/config.json
+# Edit the demo target and user-agent contact before starting the stack.
+export HARVEST_ADMIN_TOKEN="$(head -c24 /dev/urandom | base64)"
+export GRAFANA_ADMIN_PASSWORD="$(head -c18 /dev/urandom | base64)"
 docker compose -f ops/docker-compose.yml up --build -d
-# Grafana on :3000 (admin/change-me-first-login) → "Harvest" folder, pre-provisioned dashboard
+# Console: http://127.0.0.1:8088
+# Grafana: http://127.0.0.1:3000 (user admin, password is the value you generated)
 ```
 
 ## Configuration (JSON)
@@ -297,8 +303,9 @@ port. Unset token = open endpoints **and that is only allowed on
 loopback**: `metrics_addr` bound to a routable address (or `0.0.0.0`) with
 no token fails validation at startup — as do empty/short (<12 char) tokens,
 malformed `redis://`/`http(s)://` endpoints, `..` in any configured path,
-`max_retries > 10`, zero timeouts, `max_response_bytes < 4096`, and proxy
-URLs with non-proxy schemes. All responses carry
+`max_retries > 10`, zero timeouts, `max_response_bytes` outside
+4096..=64 MiB or a response-cap × effective-worker reservation above 1 GiB,
+and proxy URLs with non-proxy schemes. All responses carry
 `x-content-type-options: nosniff` + `cache-control: no-store`.
 
 **Secret injection:** any config string that is *exactly* `${VAR_NAME}` is
@@ -308,10 +315,11 @@ substrings (CSS selectors, UA text) are left untouched. This is the
 mechanism `ops/docker-compose.yml` relies on — no secrets in images,
 volumes, or git.
 
-### Control plane (authenticated execution)
+### Control plane (bounded execution)
 
-Six routes turn the admin API from a read-mostly view into a bounded execution
-surface — and nothing more than that:
+The bounded control plane adds six command/job routes (three submissions,
+two job reads, and cancellation), plus three artifact metadata/download/verify
+routes:
 
 ```
 POST /control/crawl            # one bounded crawl over the config's targets
@@ -325,12 +333,14 @@ GET  /artifacts/:id            # the bytes (verification-gated, size-capped)
 GET  /artifacts/:id/verify     # re-run the manifest + checksum comparison
 ```
 
-Every one of them requires the bearer token (`/health` and `/live` stay open).
-A command is validated against fixed ceilings, clamped down to the attached
+When `admin_token` is configured, these routes require its bearer token
+(`/health` and `/live` stay open). Without a token, the normal loopback-only
+policy applies. A command is validated against fixed ceilings, clamped down to the attached
 configuration, and run as one job with a deadline; at most 8 run at once and
 64 may be in flight — beyond that the answer is a clean 503, never a queue
-that grows without bound. Submissions accept an `Idempotency-Key`, so a
-retry returns the original job instead of starting a second one.
+that grows without bound. Crawl/export/AI submissions accept an
+`Idempotency-Key`, so a retry returns the original job instead of starting a
+second one; cancel is state-aware and a terminal-job repeat returns 409.
 
 The crawl runs on the same engine the scheduler uses, the export on the same
 exporter as `harvest export`, the AI round on the same client as the pipeline.
@@ -379,8 +389,17 @@ always clean.
 ### Dead-letter queue (work you didn't get, and work to try again)
 
 Any URL whose page request failed after retries (`failed:…`), was refused by
-the site (`blocked:403`, …), or got robots-denied *on a retry*, is appended to
-`dlq_path` as one JSON line `{url, reason, attempts}`:
+the site (`blocked:403`, …), or got robots-denied *on a retry*, is retained in
+`dlq_path` as one JSON line. Entries include `{url, reason, attempts, target}`;
+the file is rewritten atomically with owner-only permissions rather than
+appended in place. Existing entries remain when a run is not retrying the DLQ.
+
+For privacy, URL userinfo is removed (the URL is reduced to its origin) and
+known-sensitive query values are masked. Such entries are marked
+`"retryable": false` because the original request cannot safely be reconstructed;
+configure credentials through trusted settings and review those failures
+manually. Repeated failures are retained with `"dead_for_good": true` once
+`dlq_max_attempts` is reached.
 
 ```bash
 harvest run --config client.json            # broken pages accumulate in out/dlq.jsonl
@@ -411,8 +430,9 @@ harvest queue  --config big.json --prefix job42                 # jobs/inflight/
   heartbeats a short-TTL lease naming itself (`--name`, default `w-<pid>`),
   so the sweep skips work that is slow-but-alive instead of double-processing
   it.
-* **Shared politeness**: the per-host rate limiter is a Redis fixed window
-  across *all* shards — 4 workers at 3 rps means the site sees 3 rps, not 12.
+* **Shared politeness**: a Redis-time fractional token bucket, minimum
+  spacing, robots `Crawl-delay` floor, and refusal backoff are shared atomically
+  across workers — adding shards does not multiply the agreed request rate.
   robots.txt is fetched once per origin for the whole fleet (TTL-cached in
   Redis). Refusals (401/403/451) are never retried — retries are queue-level
   (`max_retries`) and land on `{prefix}:dlq` with a reason, same philosophy
@@ -579,9 +599,12 @@ queue, worker states, open circuit breakers, event-bus health), `/events`
 `/policy` (machine-readable stance — hand this to a client's legal team),
 plus the operational views — `/jobs`, `/runs`, `/failures`, `/retries`,
 `/workers`, `/queue`, `/proxies`, `/pipeline`, `/storage`, `/diagnostics`,
-`/alerts`, `/ops`, `/audit`, `/config` (all bounded and filtered; two POST
-operator actions: `/alerts/ack`, `/ops/note`). Every response carries an
-`x-request-id` correlation id and errors use one JSON envelope — see
+`/alerts`, `/ops`, `/audit`, `/config` (all bounded and filtered; six POST
+mutations: `/alerts/ack`, `/ops/note`, `/control/crawl`, `/control/export`,
+`/control/ai`, `/control/jobs/:id/cancel`). `/health` and `/live` are the
+unauthenticated liveness routes. Every response carries an `x-request-id`
+correlation id; structured API errors use one JSON envelope, while unknown-route
+404 hints are plain text and artifact downloads return file bytes — see
 [docs/api.md](docs/api.md). Counters include
 what a compliance team actually asks for: `harvest_robots_denials`,
 `harvest_politeness_sleeps`, `harvest_requests_blocked`,
@@ -609,7 +632,7 @@ in docs but not in the tree.
 
 ```mermaid
 flowchart LR
-  W[Console (web/ React)] -->|fetch /api/*| A["admin API<br/>src/admin.rs (23 GET + 2 POST)"]
+  W[Console (web/ React)] -->|fetch /api/*| A["admin API<br/>src/admin.rs (28 GET + 6 POST)"]
   A --> E[Engine<br/>src/engine.rs]
   E --> S[Scheduler<br/>src/sched.rs + history]
   S --> P["Policy + Robots<br/>policy.rs · robots.rs · budget.rs · breaker.rs"]
@@ -658,7 +681,7 @@ The same nouns mean the same things everywhere; docs never call a run a
 # the gates every commit must pass (see .github/workflows/ci.yml):
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features          # 669 engine tests (655 default): 460 unit + integration suites (live-redis/pg gated by env, skip with a reason)
+cargo test --all-targets --all-features  # live Redis/Postgres tests are env-gated; full live-service run: 728 passed
 cargo build --release --all-features
 
 # feature combos (CI checks each in isolation):
@@ -721,9 +744,10 @@ harvest/
   missing-var = named error, credential-bearing URLs redacted at every log
   site, attestation hash computed pre-expansion so secrets never leak into
   the recorded policy identity.
-* **Hand-rolled admin server** (no framework): 2 KB bounded request parse,
-  path-keyed routing over six read-only routes, timing-safe bearer compare,
-  constant 401 bodies, `nosniff`/`no-store` on every response.
+* **Hand-rolled admin server** (no framework): 8 KiB header cap, 2 KiB query
+  cap, bounded per-route POST bodies (4 KiB operator actions / 64 KiB control
+  commands), method+path routing over 34 routes (28 GET + 6 POST), timing-safe
+  bearer comparison, constant 401 bodies, and `nosniff`/`no-store` headers.
 * **Deterministic exports**: same inputs ⇒ byte-identical CSV/JSONL
   (only `generated_ts` moves); manifest hashes every file; HMAC receipts are
   one `sha256sum`-level dep away from client-verifiable (no PKI needed).
@@ -736,8 +760,9 @@ harvest/
 
 Stated because they matter to deployment decisions — none is a hidden risk:
 
-* Shutdown drains on **SIGINT only**; SIGTERM (docker default stop) does not
-  drain (`ops/docker-compose.yml` sets `stop_signal: SIGINT`).
+* Shutdown handles **SIGINT and SIGTERM**. Requests and storage waits cancel,
+  owned delivery threads drain/join, and terminal jobs do not leave background
+  delivery workers running. Allow at least 45s of container/service stop grace.
 * Attestation is **symmetric HMAC** — strong tamper-evidence, but both
   key-holders can produce a valid signature (asymmetric signing is Roadmap).
 * HTML parsing is static (`scraper`): **no JavaScript rendering**; pages that
@@ -752,9 +777,9 @@ Stated because they matter to deployment decisions — none is a hidden risk:
   speaks plain HTTP to `metrics_addr`; upstream HTTPS is honored).
 * Postgres sink targets one table (`harvest_records`, auto-created); schema
   evolution/partitioning of huge tables is a DBA-side concern.
-* Pacing implementations differ by mode: single-process uses the in-memory
-  token bucket; distributed mode shares a per-host **fixed-window** counter
-  (per Redis prefix) — both bound the rate, with different granularity.
+* Pacing implementations differ by mode: single-process uses an in-memory
+  token bucket; distributed mode uses an atomic Redis-time token bucket with
+  shared minimum spacing, crawl-delay, and refusal backoff per Redis prefix.
   Workers under different prefixes do not coordinate.
 
 ## Production checklist (buy-side summary)
@@ -774,18 +799,19 @@ engine behavior or the compose file as shipped:
 - [ ] logs → stdout only, rotated by the runtime; RUST_LOG left at info
 - [ ] backups: history file, per-delivery audit.json(.sig), attest key
       archive, `pg_dump` for Postgres sinks
-- [ ] `stop_signal: SIGINT` + grace period for drain-on-stop
+- [ ] `stop_signal: SIGTERM` + 45-second grace period for drain-on-stop
 - [ ] Prometheus scrape carries `$HARVEST_ADMIN_TOKEN` bearer (compose wires it)
 
 ## Project status
 
 Version **0.10.0** (see CHANGELOG). Licensed MIT (see [LICENSE](LICENSE)) —
 the `license` field in `Cargo.toml`; adjust terms before commercial
-distribution. Test suite: **655 engine tests** (default features;
-669 with `--all-features`, Redis + Postgres services live in CI) + **351
-console tests** across 124 files + 12 built-app smoke checks + 18 buyer-flow
-E2E checks; all four feature combos compile-check; clippy `-D warnings` clean;
-fmt clean; `make links` reports 0 broken links. The
+distribution. Verified here: **728 Rust tests** in the all-target/all-feature
+run with live Redis and PostgreSQL; **368 console tests across 126 files**;
+ESLint, TypeScript, production build, and npm audit pass; buyer-flow E2E is
+**18/18**. All four backend feature configurations compile-check; clippy
+`-D warnings` and rustfmt pass; 302 repository links checked with 0 broken.
+The
 engine is pre-1.0: config field names and file formats are treated as the
 compatibility surface and any break will be changelogged with a migration
 note. This README, `docs/`, `examples/` and `SECURITY.md` describe the

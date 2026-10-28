@@ -17,6 +17,18 @@ include = [
   "/.github",
   "/web/e2e",
   "/build.rs",
+  "/deploy",
+  "/SECURITY.md",
+  "/CONTRIBUTING.md",
+  "/config.example.json",
+  "/rust-toolchain.toml",
+  "/.dockerignore",
+  "/.editorconfig",
+  "/.gitattributes",
+  "/web/.dockerignore",
+  "/web/.nvmrc",
+  "/web/eslint.config.js",
+  "/web/nginx.conf.example",
   "/README.md",
   "/CHANGELOG.md",
   "/LICENSE",
@@ -24,41 +36,54 @@ include = [
   "/web/package-lock.json",
   "/web/tsconfig.json",
   "/web/vite.config.ts",
-  "/web/vitest.config.ts",
   "/web/index.html",
 ]
 name = "harvest"
 version = "0.10.0"
 edition = "2021"
+rust-version = "1.88"
+repository = "https://github.com/Ainul-550Islam/Web-Scraper"
+readme = "README.md"
 description = "Compliance-first async data-collection engine in Rust: polite scheduling, per-domain rate limiting, robots.txt enforcement, proxy failover, typed extraction, JSONL/SQLite sinks, Prometheus metrics."
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "signal", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip", "brotli", "deflate", "charset", "json", "blocking"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "signal", "fs", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "gzip", "brotli", "deflate", "charset", "json", "blocking", "socks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = { version = "2", features = ["serde"] }
-scraper = "0.20"
+scraper = { version = "0.27", default-features = false, features = ["errors"] }
+csv = "1.4"
+httpdate = "1"
+fs2 = "0.4.3"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 sha2 = "0.10"
 hmac = "0.12"
+# OS-backed portable randomness for signing keys and restart-safe identifiers.
+getrandom = "0.4.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
-redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp"] }
+redis = { version = "0.32.7", optional = true, default-features = false, features = ["tokio-rustls-comp", "connection-manager", "script"] }
+# PG TLS must be a real transport, not just a documented DSN knob.
+tokio-postgres-rustls = { version = "0.14", optional = true, features = ["ring", "native-certs"] }
 # tiny, already in the transitive tree (tokio/socket2); used solely to
 # restore unix SIGPIPE semantics in main() (see tests/cli.rs)
 libc = "0.2"
 regex = "1"
+base64 = { version = "0.22", optional = true }
 
 [features]
 default = []
 sqlite = ["dep:rusqlite"]
-postgres = ["dep:tokio-postgres"]
+postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 redis = ["dep:redis"]
+# WebDriver-backed browser runtime is opt-in; default HTTP-only builds do not
+# activate subprocess support or launch a browser.
+browser = ["tokio/process", "dep:base64"]
 # Test harness surface (`harvest::testutil`). Never enabled by builds of
 # downstream users; enabled for integration tests via the dev-dependency on
 # this very package below.

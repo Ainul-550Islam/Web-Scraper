@@ -50,6 +50,14 @@ fn production_example_needs_env_secrets_and_succeeds_once_present() {
         "HARVEST_ADMIN_TOKEN",
         "dummy-value-long-enough-for-the-entropy-gate",
     );
-    let cfg = harvest::config::Config::load(&path).expect("production example with env set");
-    assert!(!cfg.targets.is_empty());
+    let loaded = harvest::config::Config::load(&path);
+    if cfg!(feature = "sqlite") {
+        let cfg = loaded.expect("production example with env set");
+        assert!(!cfg.targets.is_empty());
+    } else {
+        assert!(loaded
+            .expect_err("SQLite output must be refused without the feature")
+            .to_string()
+            .contains("features sqlite"));
+    }
 }

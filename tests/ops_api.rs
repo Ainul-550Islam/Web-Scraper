@@ -79,7 +79,7 @@ fn http(
         .map(|t| format!("authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nhost: x\r\n{auth}content-length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-length: {}\r\n\r\n{body}",
         body.len()
     );
     sock.write_all(req.as_bytes()).unwrap();
@@ -290,12 +290,20 @@ fn live_workflow_serve_api_alerts_audit_cli() {
     let (st404, b404, h404) = http(&addr, "GET", "/definitely-nope", Some(TOK), "");
     assert_eq!(st404, 404);
     assert!(b404.starts_with("see /"));
+    assert!(
+        b404.contains("/control/crawl"),
+        "control routes appear in 404 hints: {b404}"
+    );
+    assert!(
+        b404.contains("/artifacts/:id/verify"),
+        "artifact routes appear in 404 hints: {b404}"
+    );
     assert!(h404.iter().any(|(k, _)| k == "x-request-id"));
     let raw = {
         let mut sock = TcpStream::connect(&addr).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         sock.write_all(
-            b"GET /stats HTTP/1.1\r\nhost: x\r\nauthorization: Bearer s3cr3t-ops-token-xyz\r\nx-request-id: trace-42\r\n\r\n",
+            b"GET /stats HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer s3cr3t-ops-token-xyz\r\nx-request-id: trace-42\r\n\r\n",
         )
         .unwrap();
         let mut b = Vec::new();
@@ -310,7 +318,7 @@ fn live_workflow_serve_api_alerts_audit_cli() {
         let mut sock = TcpStream::connect(&addr).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         sock.write_all(
-            b"GET /stats HTTP/1.1\r\nhost: x\r\nauthorization: Bearer s3cr3t-ops-token-xyz\r\nx-request-id: evil value\r\nx-injected: yes\r\n\r\n",
+            b"GET /stats HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer s3cr3t-ops-token-xyz\r\nx-request-id: evil value\r\nx-injected: yes\r\n\r\n",
         )
         .unwrap();
         let mut b = Vec::new();
@@ -608,7 +616,7 @@ async fn bounded_listings_under_big_history() {
         let mut client = client;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         client
-            .write_all(b"GET /runs?limit=10000 HTTP/1.1\r\nhost: x\r\n\r\n")
+            .write_all(b"GET /runs?limit=10000 HTTP/1.1\r\nhost: localhost\r\n\r\n")
             .await
             .unwrap();
         let mut out = Vec::new();

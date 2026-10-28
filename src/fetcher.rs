@@ -78,6 +78,11 @@ pub struct Fetcher {
     /// live loop uses. The legacy `get`/`get_with` path and `execute` share
     /// it, so there is exactly one delay curve in the binary.
     pub policy: RetryPolicy,
+    stops: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    pacing: Option<Arc<crate::policy::Politeness>>,
+    #[cfg(feature = "redis")]
+    shared_pacing: Option<crate::dist::Queue>,
+    robots: RwLock<HashMap<String, Arc<crate::robots::Robots>>>,
 }
 
 #[derive(Default)]
@@ -105,6 +110,66 @@ impl Fetcher {
             clients: RwLock::new(HashMap::new()),
             salt: AtomicCounter::default(),
             policy,
+            stops: Vec::new(),
+            pacing: None,
+            #[cfg(feature = "redis")]
+            shared_pacing: None,
+            robots: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        stops: Vec<Arc<std::sync::atomic::AtomicBool>>,
+        pacing: Option<Arc<crate::policy::Politeness>>,
+    ) -> Self {
+        self.stops = stops;
+        self.pacing = pacing;
+        self
+    }
+    #[cfg(feature = "redis")]
+    pub(crate) fn with_shared_pacing(mut self, queue: crate::dist::Queue) -> Self {
+        self.shared_pacing = Some(queue);
+        self
+    }
+    #[cfg(feature = "redis")]
+    pub(crate) fn remember_robots(&self, base: &Url, text: Option<&str>) {
+        let rules = text.map_or_else(crate::robots::Robots::default, |s| {
+            crate::robots::Robots::parse(s, &crate::engine::ua_token(&self.cfg.user_agent))
+        });
+        self.robots
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(base.origin().ascii_serialization(), Arc::new(rules));
+    }
+    pub(crate) async fn wait_initial(&self, host: &str, metrics: &Metrics) -> bool {
+        if let Some(pacing) = &self.pacing {
+            if pacing.is_abandoned(host, &self.cfg) {
+                return false;
+            }
+            let wait = pacing.wait(host, &self.cfg, metrics);
+            tokio::pin!(wait);
+            loop {
+                if self.stopped() {
+                    return false;
+                }
+                tokio::select! { _ = &mut wait => return !self.stopped(), _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+            }
+        }
+        !self.stopped()
+    }
+    fn stopped(&self) -> bool {
+        self.stops
+            .iter()
+            .any(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    async fn pause(&self, delay: Duration) -> bool {
+        let mut sleep = Box::pin(tokio::time::sleep(delay));
+        loop {
+            if self.stopped() {
+                return false;
+            }
+            tokio::select! { _ = &mut sleep => return true, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
         }
     }
 
@@ -123,7 +188,7 @@ impl Fetcher {
             .user_agent(&self.cfg.user_agent)
             .timeout(Duration::from_secs(self.cfg.request_timeout_secs))
             .connect_timeout(Duration::from_secs(self.cfg.connect_timeout_secs))
-            .redirect(reqwest::redirect::Policy::limited(5));
+            .redirect(reqwest::redirect::Policy::none());
         // No cookie store: the `cookies` feature is intentionally not enabled,
         // so each request is stateless per egress (explicit isolation, not spoofing).
         if let Some(u) = url {
@@ -176,11 +241,72 @@ impl Fetcher {
     pub async fn fetch_robots(&self, base: &Url, metrics: &Metrics) -> Option<String> {
         let mut robots = base.clone();
         robots.set_path("/robots.txt");
-        metrics.robot_fetched();
-        match self.try_once(&robots, metrics, None).await {
-            Ok(o) if o.status == 200 && o.content_type.starts_with("text") => Some(o.body),
-            _ => None,
+        robots.set_query(None);
+        robots.set_fragment(None);
+        if !self
+            .wait_initial(base.host_str().unwrap_or_default(), metrics)
+            .await
+        {
+            return Some(crate::robots::UNAVAILABLE_POLICY.into());
         }
+        metrics.robot_fetched();
+        metrics.request_started();
+        let text = match self
+            .try_once_scoped(&robots, metrics, None, None, true)
+            .await
+            .0
+        {
+            Ok(o)
+                if o.status == 200
+                    && (o.content_type.starts_with("text/plain")
+                        || o.body.to_ascii_lowercase().contains("user-agent:")) =>
+            {
+                Some(o.body)
+            }
+            Ok(o) if matches!(o.status, 404 | 410) => None,
+            Err(FetchError::Blocked { retry_after, .. }) => {
+                metrics.request_blocked();
+                if let Some(pacing) = &self.pacing {
+                    pacing.note_block(base.host_str().unwrap_or_default(), &self.cfg, retry_after);
+                }
+                #[cfg(feature = "redis")]
+                if let Some(queue) = &self.shared_pacing {
+                    let _ = queue
+                        .clone()
+                        .note_block(base.host_str().unwrap_or_default(), &self.cfg, retry_after)
+                        .await;
+                }
+                Some(crate::robots::UNAVAILABLE_POLICY.into())
+            }
+            _ => {
+                tracing::warn!(origin = %crate::config::redact_url_origin(base.as_str()), "robots.txt unavailable/refused; denying this origin until cache refresh");
+                Some(crate::robots::UNAVAILABLE_POLICY.to_string())
+            }
+        };
+        let policy = Arc::new(
+            text.as_ref()
+                .map(|t| {
+                    crate::robots::Robots::parse(t, &crate::engine::ua_token(&self.cfg.user_agent))
+                })
+                .unwrap_or_default(),
+        );
+        if let Some(delay) = policy.required_delay() {
+            if let Some(pacing) = &self.pacing {
+                pacing.note_crawl_delay(base.host_str().unwrap_or_default(), &self.cfg, delay);
+            }
+            #[cfg(feature = "redis")]
+            if let Some(queue) = &self.shared_pacing {
+                let _ = queue
+                    .clone()
+                    .note_crawl_delay(base.host_str().unwrap_or_default(), delay)
+                    .await;
+            }
+        }
+        self.robots
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(base.origin().ascii_serialization(), policy);
+        text
     }
 
     async fn try_once(
@@ -201,6 +327,43 @@ impl Fetcher {
         url: &Url,
         metrics: &Metrics,
         extra: Option<&Vec<(String, String)>>,
+    ) -> (Result<FetchOutcome, FetchError>, AttemptTrace) {
+        self.try_once_scoped(url, metrics, extra, None, false).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn try_once_scoped(
+        &self,
+        url: &Url,
+        metrics: &Metrics,
+        extra: Option<&Vec<(String, String)>>,
+        target: Option<&crate::config::TargetCfg>,
+        robots_request: bool,
+    ) -> (Result<FetchOutcome, FetchError>, AttemptTrace) {
+        let request = self.try_once_scoped_inner(url, metrics, extra, target, robots_request);
+        tokio::pin!(request);
+        loop {
+            if self.stopped() {
+                return (
+                    Err(FetchError::Permanent("request cancelled".into())),
+                    AttemptTrace {
+                        proxy_id: "cancelled".into(),
+                        transport_failed: false,
+                        latency_ms: 0,
+                    },
+                );
+            }
+            tokio::select! { out = &mut request => return out, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+        }
+    }
+    #[allow(clippy::type_complexity)]
+    async fn try_once_scoped_inner(
+        &self,
+        url: &Url,
+        metrics: &Metrics,
+        extra: Option<&Vec<(String, String)>>,
+        target: Option<&crate::config::TargetCfg>,
+        robots_request: bool,
     ) -> (Result<FetchOutcome, FetchError>, AttemptTrace) {
         let idx = self.pool.pick(self.salt.next());
         let trace0 = AttemptTrace {
@@ -230,25 +393,143 @@ impl Fetcher {
             Err(e) => return (Err(FetchError::Failed(e.to_string())), trace0),
         };
         let t0 = Instant::now();
-        let mut rb = client.get(url.as_str());
-        if let Some(hdrs) = extra {
-            for (k, v) in hdrs {
-                rb = rb.header(k.as_str(), v.as_str());
-            }
-        }
-        let mut resp = match rb.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let latency = t0.elapsed().as_millis() as u64;
+        let mut current = url.clone();
+        let mut redirects = 0;
+        let mut resp = loop {
+            if self.stopped() {
                 return (
-                    Err(FetchError::Failed(e.to_string())),
-                    AttemptTrace {
-                        transport_failed: true,
-                        latency_ms: latency,
-                        ..trace0
-                    },
+                    Err(FetchError::Permanent("request cancelled".into())),
+                    trace0,
                 );
             }
+            #[cfg(feature = "redis")]
+            if let Some(shared) = &self.shared_pacing {
+                let mut queue = shared.clone();
+                let host = current.host_str().unwrap_or_default();
+                if let Err(e) = queue
+                    .wait_policy(host, &self.cfg.policy_for(host), self.stops.first())
+                    .await
+                {
+                    return (Err(FetchError::Permanent(e.to_string())), trace0);
+                }
+                if self.stopped() {
+                    return (
+                        Err(FetchError::Permanent("request cancelled".into())),
+                        trace0,
+                    );
+                }
+            }
+            let mut rb = client.get(current.as_str());
+            // Validators belong to the requested resource, not to a redirect destination.
+            if redirects == 0 {
+                if let Some(hdrs) = extra {
+                    for (k, v) in hdrs {
+                        rb = rb.header(k.as_str(), v.as_str());
+                    }
+                }
+            }
+            let response = match rb.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return (
+                        Err(FetchError::Failed(e.without_url().to_string())),
+                        AttemptTrace {
+                            transport_failed: true,
+                            latency_ms: t0.elapsed().as_millis() as u64,
+                            ..trace0
+                        },
+                    )
+                }
+            };
+            if !response.status().is_redirection() || response.status().as_u16() == 304 {
+                break response;
+            }
+            if redirects >= 5 {
+                return (
+                    Err(FetchError::Permanent(
+                        "redirect limit exceeded (5 hops)".into(),
+                    )),
+                    trace0,
+                );
+            }
+            let next = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| current.join(h).ok());
+            let Some(next) = next else {
+                return (
+                    Err(FetchError::Permanent(
+                        "redirect has no valid Location".into(),
+                    )),
+                    trace0,
+                );
+            };
+            if next.origin() != url.origin()
+                || next.username() != url.username()
+                || next.password() != url.password()
+            {
+                return (
+                    Err(FetchError::Permanent(
+                        "redirect destination is outside the approved origin".into(),
+                    )),
+                    trace0,
+                );
+            }
+            if !robots_request {
+                if target.is_some_and(|t| {
+                    (!t.include.is_empty() && !t.include.iter().any(|p| next.as_str().contains(p)))
+                        || t.exclude.iter().any(|p| next.as_str().contains(p))
+                }) {
+                    return (
+                        Err(FetchError::Permanent(
+                            "redirect destination is outside target include/exclude scope".into(),
+                        )),
+                        trace0,
+                    );
+                }
+                if self.cfg.respect_robots {
+                    let rules = self
+                        .robots
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .get(&url.origin().ascii_serialization())
+                        .cloned();
+                    if rules.is_none_or(|r| !r.allows_url(&next)) {
+                        metrics.robot_denied();
+                        return (Err(FetchError::RobotsDenied), trace0);
+                    }
+                }
+            }
+            let redirect_wait = parse_retry_after(response.headers());
+            drop(response);
+            if let Some(delay) = redirect_wait {
+                if delay > Duration::from_secs(3600) {
+                    return (Err(FetchError::Permanent("redirect Retry-After exceeds the supported wait; destination was not fetched".into())), trace0);
+                }
+                if !self.pause(delay).await {
+                    return (
+                        Err(FetchError::Permanent("request cancelled".into())),
+                        trace0,
+                    );
+                }
+            }
+            if let Some(pacing) = &self.pacing {
+                let mut permit =
+                    Box::pin(pacing.wait(next.host_str().unwrap_or_default(), &self.cfg, metrics));
+                loop {
+                    if self.stopped() {
+                        return (
+                            Err(FetchError::Permanent("request cancelled".into())),
+                            trace0,
+                        );
+                    }
+                    tokio::select! { _ = &mut permit => break, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+                }
+            }
+            metrics.request_started();
+            redirects += 1;
+            current = next;
         };
         let status = resp.status().as_u16();
         let ct = resp
@@ -258,6 +539,23 @@ impl Fetcher {
             .unwrap_or("application/octet-stream")
             .to_string();
         let retry_after = parse_retry_after(resp.headers());
+        if matches!(status, 401 | 403 | 429 | 451) || (status == 503 && retry_after.is_some()) {
+            self.pool.report(idx, true, t0.elapsed().as_millis() as u64);
+            return (
+                Err(FetchError::Blocked {
+                    status,
+                    retry_after,
+                }),
+                trace0,
+            );
+        }
+        if !robots_request && (400..500).contains(&status) {
+            self.pool.report(idx, true, t0.elapsed().as_millis() as u64);
+            return (
+                Err(FetchError::Permanent(format!("upstream HTTP {status}"))),
+                trace0,
+            );
+        }
         let etag = resp
             .headers()
             .get(reqwest::header::ETAG)
@@ -313,7 +611,10 @@ impl Fetcher {
                     let latency = t0.elapsed().as_millis() as u64;
                     self.pool.report(idx, false, latency);
                     return (
-                        Err(FetchError::Failed(format!("body read: {e}"))),
+                        Err(FetchError::Failed(format!(
+                            "body read: {}",
+                            e.without_url()
+                        ))),
                         AttemptTrace {
                             transport_failed: true,
                             latency_ms: latency,
@@ -326,7 +627,7 @@ impl Fetcher {
         let body = String::from_utf8_lossy(&acc).into_owned();
         let latency = t0.elapsed().as_millis() as u64;
         let outcome = FetchOutcome {
-            url: url.clone(),
+            url: current,
             etag,
             last_modified,
             status,
@@ -393,6 +694,9 @@ impl Fetcher {
             // Deadline first: an attempt that cannot finish in time is not
             // started at all (this is what makes job deadlines real rather
             // than advisory).
+            if self.stopped() {
+                return Err((FetchError::Permanent("request cancelled".into()), meta));
+            }
             if plan.expired(Instant::now()) {
                 meta.total_ms = started.elapsed().as_millis() as u64;
                 meta.deadline_hit = true;
@@ -411,7 +715,15 @@ impl Fetcher {
                 EventKind::RequestStarted,
                 json!({"url": plan.url.as_str(), "attempt": attempt}),
             );
-            let (res, trace) = self.try_once_traced(&plan.url, metrics, headers).await;
+            let (res, trace) = self
+                .try_once_scoped(
+                    &plan.url,
+                    metrics,
+                    headers,
+                    self.cfg.targets.get(ctx.target),
+                    false,
+                )
+                .await;
             meta.egress = trace.proxy_id.clone();
             meta.last_attempt_ms = trace.latency_ms;
             ctx.publish(
@@ -527,7 +839,12 @@ impl Fetcher {
                                         "reason": reason.as_str(),
                                     }),
                                 );
-                                tokio::time::sleep(delay).await;
+                                if !self.pause(delay).await {
+                                    return Err((
+                                        FetchError::Permanent("request cancelled".into()),
+                                        meta,
+                                    ));
+                                }
                             }
                             RetryDecision::Exhausted { .. } => {
                                 meta.total_ms = started.elapsed().as_millis() as u64;
@@ -597,7 +914,9 @@ async fn get_with_retries(
                 let jitter = f.salt.next() % 251;
                 let wait = (exp + jitter).min(cap);
                 metrics.note_backoff_ms(wait);
-                tokio::time::sleep(Duration::from_millis(wait)).await;
+                if !f.pause(Duration::from_millis(wait)).await {
+                    return Err(FetchError::Permanent("request cancelled".into()));
+                }
             }
         }
     }
@@ -609,44 +928,15 @@ fn is_block(status: u16) -> bool {
 
 /// Parse Retry-After: delay-seconds or HTTP date (best effort).
 pub fn parse_retry_after(h: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let v = h.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    if let Ok(secs) = v.trim().parse::<u64>() {
-        return Some(Duration::from_secs(secs.min(3600)));
+    let v = h.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
     }
-    // HTTP-date: compute delta from now; unparsable dates => None.
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    // Minimal IMF-fixdate parse: "Wed, 21 Oct 2015 07:28:00 GMT"
-    let parts: Vec<&str> = v.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mon = months
-        .iter()
-        .position(|m| m.eq_ignore_ascii_case(parts[2]))? as u64;
-    let year: u64 = parts[3].parse().ok()?;
-    let day: u64 = parts[1].parse().ok()?;
-    let hhmm: Vec<&str> = parts[4].split(':').collect();
-    if hhmm.len() != 3 {
-        return None;
-    }
-    let (h, m, s) = (
-        hhmm[0].parse::<u64>().ok()?,
-        hhmm[1].parse::<u64>().ok()?,
-        hhmm[2].parse::<u64>().ok()?,
-    );
-    // Days since epoch, civil-from-days algorithm inverted (days since 1970):
-    let y = if mon < 2 { year + 4800 } else { year + 4799 };
-    let m2 = (mon + 1) % 12;
-    let days = day + (153 * m2 + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32082 - 719468;
-    let when = days * 86400 + h * 3600 + m * 60 + s;
-    if when > now {
-        Some(Duration::from_secs((when - now).min(3600)))
-    } else {
-        Some(Duration::ZERO)
-    }
+    let when = httpdate::parse_http_date(v).ok()?;
+    Some(
+        when.duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 #[cfg(test)]

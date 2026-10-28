@@ -2,7 +2,7 @@
 
 
 
-/* ── POST bodies (the only two mutating routes) ──────────────── */
+/* Alert-ack POST body; bounded control-plane command shapes are modeled separately. */
 export interface AckRequest {
   id: string; // correlation id or "*" (bulk)
 }

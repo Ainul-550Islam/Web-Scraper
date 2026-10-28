@@ -2,5 +2,5 @@
 # part of every gate (see Makefile), so the pinned channel keeps CI and local
 # formatting byte-identical.
 [toolchain]
-channel = "stable"
+channel = "1.88.0"
 components = ["rustfmt", "clippy"]

@@ -125,7 +125,7 @@ pub fn load(dir: &Path) -> Result<Artifact, ArtifactError> {
 /// manifest must be a direct child named exactly `manifest.json` (no
 /// traversal, no symlinked names through `..`).
 pub fn safe_manifest_path(dir: &Path) -> Result<std::path::PathBuf, ArtifactError> {
-    let name_ok = dir.file_name().is_some();
+    let name_ok = dir.file_name().is_some() || dir == Path::new(".");
     let joined = dir.join("manifest.json");
     let clean = joined.components().count() > 1
         && !joined

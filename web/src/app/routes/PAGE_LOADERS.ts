@@ -4,7 +4,8 @@ import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 
 
 /** Lazy page modules — code-split per feature (vite chunks). */
-export const PAGE_LOADERS: Record<string, LazyExoticComponent<ComponentType>> = {
+export const PAGE_LOADERS: Readonly<Record<string, LazyExoticComponent<ComponentType>>> = Object.freeze(Object.assign(
+  Object.create(null) as Record<string, LazyExoticComponent<ComponentType>>, {
   "/": lazy(() => import("../../features/overview/Overview")),
   "/runs": lazy(() => import("../../features/runs/Runs")),
   "/jobs": lazy(() => import("../../features/jobs/Jobs")),
@@ -27,8 +28,9 @@ export const PAGE_LOADERS: Record<string, LazyExoticComponent<ComponentType>> = 
   "/api": lazy(() => import("../../features/api/ApiExplorer")),
   "/export": lazy(() => import("../../pages/ExportCenter")),
   "/crawl": lazy(() => import("../../pages/CrawlStudio")),
+  "/browser-studio": lazy(() => import("../../features/browser-studio/BrowserStudio")),
   "/ai": lazy(() => import("../../pages/AiAssist")),
   "/control": lazy(() => import("../../pages/ControlJobs")),
   "/control/job": lazy(() => import("../../pages/ControlJobDetail")),
   "/artifacts": lazy(() => import("../../pages/Artifacts")),
-};
+}));

@@ -104,6 +104,7 @@ pub struct AdminState {
     ops: Arc<OpsLog>,
     audit: Arc<AuditLedger>,
     alerts: Arc<AlertLedger>,
+    downloads: Arc<tokio::sync::Semaphore>,
     /// Control plane: created when a config is attached, because crawl scope,
     /// the export source and the artifact root all come from it. `None` means
     /// the execution routes answer 503 instead of guessing.
@@ -134,6 +135,7 @@ impl AdminState {
             ops: Arc::new(OpsLog::new()),
             audit: Arc::new(AuditLedger::new()),
             alerts: Arc::new(AlertLedger::new()),
+            downloads: Arc::new(tokio::sync::Semaphore::new(2)),
             control: Mutex::new(None),
             artifacts: Mutex::new(Arc::new(ArtifactStore::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -171,7 +173,15 @@ impl AdminState {
     /// The artifact root is the directory the config already writes to, so a
     /// control-plane delivery never introduces a new writable location.
     fn attach_control_plane(&self, cfg: Arc<Config>) {
-        let root = control_root(&cfg);
+        let root = match control_root(&cfg) {
+            Ok(root) => root,
+            Err(_) => {
+                tracing::warn!(
+                    "control storage is unavailable or unsafe; mutation jobs are disabled"
+                );
+                return;
+            }
+        };
         let artifacts = Arc::new(ArtifactStore::new(root.clone()));
         let runtime = self
             .runtime
@@ -235,15 +245,26 @@ pub async fn serve(addr: String, state: Arc<AdminState>) {
     };
     state.record_ops("serve_start", json!({"addr": addr}));
     tracing::info!(%addr, "admin server listening (dashboard on /)");
+    // Bound accepted sockets as well as per-request buffers: a client that
+    // never finishes headers or never reads a response must not grow tasks forever.
+    let slots = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
         let conn = match listener.accept().await {
             Ok(c) => c,
             Err(_) => continue,
         };
         let (mut sock, _) = conn;
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            continue;
+        };
         let state = state.clone();
         tokio::spawn(async move {
-            let _ = handle(&mut sock, &state).await;
+            let _slot = slot;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                handle(&mut sock, &state),
+            )
+            .await;
         });
     }
 }
@@ -287,25 +308,55 @@ pub async fn handle<S>(sock: &mut S, state: &AdminState) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    // Read request headers (body read below, when needed). Bounded,
-    // paranoid parse: one fixed 2 KiB buffer, first CRLFCRLF wins.
+    // First CRLFCRLF wins. Header bytes have one absolute deadline (not a
+    // timeout refreshed by every byte); body bytes can never become headers.
     let t0 = std::time::Instant::now();
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; 8192];
     let mut filled = 0usize;
-    loop {
-        let n = sock.read(&mut buf[filled..]).await?;
-        if n == 0 {
-            break;
+    let boundary = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(i) = buf[..filled].windows(4).position(|w| w == b"\r\n\r\n") {
+                return Ok::<usize, std::io::Error>(i + 4);
+            }
+            if filled == buf.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "headers too large",
+                ));
+            }
+            let n = sock.read(&mut buf[filled..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "incomplete headers",
+                ));
+            }
+            filled += n;
         }
-        filled += n;
-        if buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") || filled >= buf.len() {
-            break;
+    })
+    .await;
+    let boundary = match boundary {
+        Ok(Ok(n)) => n,
+        _ => {
+            let corr = CorrelationId::new();
+            let r = err_api(
+                ApiError::invalid("incomplete, oversized or timed-out request headers"),
+                &corr,
+            );
+            return respond(sock, state, r, &corr, "??", "", t0).await;
         }
-    }
-    let head = String::from_utf8_lossy(&buf[..filled]).into_owned();
+    };
+    let head = match std::str::from_utf8(&buf[..boundary]) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            let corr = CorrelationId::new();
+            let r = err_api(ApiError::invalid("invalid request headers"), &corr);
+            return respond(sock, state, r, &corr, "??", "", t0).await;
+        }
+    };
     let mut line = head.lines().next().unwrap_or("").split_whitespace();
-    let (method, target) = match (line.next(), line.next()) {
-        (Some(m), Some(t)) => (m.to_string(), t.to_string()),
+    let (method, target) = match (line.next(), line.next(), line.next(), line.next()) {
+        (Some(m), Some(t), Some("HTTP/1.0" | "HTTP/1.1"), None) => (m.to_string(), t.to_string()),
         _ => {
             let corr = CorrelationId::new();
             let r = err_api(ApiError::invalid("malformed request line"), &corr);
@@ -329,6 +380,36 @@ where
     // (never echo client garbage into logs or error bodies).
     let corr = CorrelationId::from_incoming(header_value(&head, "x-request-id"));
     let route = route_raw.as_str();
+    for name in [
+        "content-length",
+        "authorization",
+        "host",
+        "origin",
+        "idempotency-key",
+    ] {
+        if head
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .count()
+            > 1
+        {
+            let r = err_api(
+                ApiError::invalid("duplicate request framing or security header"),
+                &corr,
+            );
+            return respond(sock, state, r, &corr, &method, route, t0).await;
+        }
+    }
+    if header_value(&head, "transfer-encoding").is_some() {
+        let r = err_api(
+            ApiError::invalid("transfer-encoding is unsupported; send Content-Length"),
+            &corr,
+        );
+        return respond(sock, state, r, &corr, &method, route, t0).await;
+    }
 
     // Bearer auth (timing-safe), fail-closed on every route EXCEPT the two
     // constant-body liveness probes: /health and /live answer fixed JSON
@@ -345,6 +426,24 @@ where
                 return respond(sock, state, r, &corr, &method, route, t0).await;
             }
         }
+    }
+
+    // Token-less mode is local CLI/browser development, not an open proxy.
+    // A browser can rebind an attacker-controlled hostname to loopback; CORS
+    // alone does not stop same-origin reads in that case.
+    if !open && state.token.is_none() && !loopback_host(header_value(&head, "host")) {
+        let r = err_api(
+            ApiError::forbidden("token-less admin requests require a loopback Host"),
+            &corr,
+        );
+        return respond(sock, state, r, &corr, &method, route, t0).await;
+    }
+    if method == "POST" && !same_origin(&head) {
+        let r = err_api(
+            ApiError::forbidden("cross-origin mutations are refused"),
+            &corr,
+        );
+        return respond(sock, state, r, &corr, &method, route, t0).await;
     }
 
     let query = match Query::parse(&qs) {
@@ -395,7 +494,13 @@ where
                 },
                 None => 0,
             };
-            read_bounded_body(sock, &mut body, want, &buf, filled).await;
+            if !read_bounded_body(sock, &mut body, want, &buf, filled).await {
+                let r = err_api(
+                    ApiError::invalid("incomplete or timed-out request body"),
+                    &corr,
+                );
+                return respond(sock, state, r, &corr, &method, route_key, t0).await;
+            }
         }
         "POST" if control_body_limit(route_key).is_some() => {
             let limit = control_body_limit(route_key).unwrap_or(COMMAND_BODY_LIMIT);
@@ -414,7 +519,13 @@ where
                 },
                 None => 0,
             };
-            read_bounded_body(sock, &mut body, want, &buf, filled).await;
+            if !read_bounded_body(sock, &mut body, want, &buf, filled).await {
+                let r = err_api(
+                    ApiError::invalid("incomplete or timed-out request body"),
+                    &corr,
+                );
+                return respond(sock, state, r, &corr, &method, route_key, t0).await;
+            }
         }
         _ => {
             let r = err_api(ApiError::method_not_allowed(&method, route_key), &corr);
@@ -425,6 +536,13 @@ where
     // Artifact bytes are the one non-JSON response: the payload is whatever
     // the exporter wrote, so it gets its own router table (which keeps the
     // route manifest complete) and its own reply path.
+    let _download_slot = match acquire_download_slot(state, route_key) {
+        Ok(slot) => slot,
+        Err(e) => {
+            let reply = err_api(e, &corr);
+            return respond(sock, state, reply, &corr, &method, route_key, t0).await;
+        }
+    };
     if let Some(reply) = dispatch_raw(state, &method, route_key, route, &corr) {
         return respond_bytes(
             sock,
@@ -477,6 +595,21 @@ fn route_shape(route: &str) -> &str {
     route
 }
 
+fn acquire_download_slot(
+    state: &AdminState,
+    route_key: &str,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, ApiError> {
+    if route_key != "/artifacts/:id" {
+        return Ok(None);
+    }
+    state
+        .downloads
+        .clone()
+        .try_acquire_owned()
+        .map(Some)
+        .map_err(|_| ApiError::unavailable("artifact download capacity is busy; retry later"))
+}
+
 /// Read at most `want` body bytes: whatever the header read already
 /// swallowed, then the rest under a hard deadline (no dangling-connection
 /// DoS). Shared by the two body-taking route families.
@@ -486,37 +619,30 @@ async fn read_bounded_body<S>(
     want: u64,
     buf: &[u8],
     filled: usize,
-) where
+) -> bool
+where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if want > 0 {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let boundary = buf[..filled]
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .map(|i| i + 4)
             .unwrap_or(filled);
-        if boundary < filled {
-            let take = (want as usize).min(filled - boundary);
-            body.extend_from_slice(&buf[boundary..boundary + take]);
-        }
+        let take = (want as usize).min(filled - boundary);
+        body.extend_from_slice(&buf[boundary..boundary + take]);
         while (body.len() as u64) < want {
-            let mut chunk = [0u8; 512];
-            let read = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                sock.read(&mut chunk),
-            )
-            .await
-            {
-                Ok(Ok(n)) => n,
-                _ => 0,
-            };
-            if read == 0 {
-                break;
+            let mut chunk = [0u8; 4096];
+            let remaining = (want as usize - body.len()).min(chunk.len());
+            match sock.read(&mut chunk[..remaining]).await {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => body.extend_from_slice(&chunk[..n]),
             }
-            let take = (want as usize - body.len()).min(read);
-            body.extend_from_slice(&chunk[..take]);
         }
-    }
+        true
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Body cap for the control-plane POST routes (`None` = no body at all).
@@ -942,7 +1068,9 @@ fn dispatch(
             "text/plain",
             "see / /live /metrics /stats /runtime /events /recent /jobs /runs /failures \
              /retries /workers /queue /proxies /pipeline /storage /diagnostics /alerts \
-             /ops /audit /config /health /policy\n"
+             /ops /audit /config /control/crawl /control/export /control/ai \
+             /control/jobs /control/jobs/:id /control/jobs/:id/cancel \
+             /control/artifacts/:id /artifacts/:id /artifacts/:id/verify /health /policy\n"
                 .to_string(),
         ),
     }
@@ -1253,7 +1381,7 @@ fn dispatch_raw(
 /// run-history directory when the sink is not a file). Nothing new is added
 /// to the deployment's filesystem layout, and every registered artifact must
 /// canonicalize inside it.
-fn control_root(cfg: &Config) -> PathBuf {
+fn control_root(cfg: &Config) -> std::io::Result<PathBuf> {
     let candidate: Option<PathBuf> = match &cfg.output {
         SinkCfg::Jsonl { path } | SinkCfg::Csv { path } | SinkCfg::Sqlite { path, .. } => path
             .parent()
@@ -1271,8 +1399,9 @@ fn control_root(cfg: &Config) -> PathBuf {
                 .map(|p| p.to_path_buf())
         })
         .unwrap_or_else(|| PathBuf::from("."));
-    std::fs::create_dir_all(&base).ok();
-    std::fs::canonicalize(&base).unwrap_or(base)
+    let root = base.join(".harvest-control");
+    crate::fsutil::prepare_private_directory(&root)?;
+    std::fs::canonicalize(root)
 }
 
 fn control_registry(state: &AdminState) -> Result<Arc<ExecutionRegistry>, ControlError> {
@@ -1488,7 +1617,16 @@ fn control_cancel(
             state.record_ops("control.cancel", json!({ "job": id, "state": job.state }));
             ok_json(serde_json::to_value(&job).unwrap_or_else(|_| json!({})))
         }
-        Err(e) => err_api(e.to_api(), corr),
+        Err(e) => {
+            state.audit.note(
+                "admin-api",
+                "control.cancel",
+                "rejected",
+                Some(id),
+                corr.as_str(),
+            );
+            err_api(e.to_api(), corr)
+        }
     }
 }
 
@@ -1638,14 +1776,51 @@ fn artifact_download(state: &AdminState, id: &str, corr: &CorrelationId) -> RawR
 }
 
 fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.lines().skip(1).find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        if k.trim().eq_ignore_ascii_case(name) {
-            Some(v.trim())
-        } else {
-            None
-        }
-    })
+    head.lines()
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            if k.trim().eq_ignore_ascii_case(name) {
+                Some(v.trim())
+            } else {
+                None
+            }
+        })
+}
+
+fn loopback_host(host: Option<&str>) -> bool {
+    host.and_then(|h| url::Url::parse(&format!("http://{h}")).ok())
+        .and_then(|u| u.host_str().map(|h| h.trim_matches(['[', ']']).to_string()))
+        .is_some_and(|h| {
+            h.eq_ignore_ascii_case("localhost")
+                || h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+fn same_origin(head: &str) -> bool {
+    // CLI requests have no Origin. Browser requests must use exactly the
+    // public origin preserved by our reverse proxies, not the backend name.
+    let Some(origin) = header_value(head, "origin") else {
+        return true;
+    };
+    let Some(host) = header_value(head, "host") else {
+        return false;
+    };
+    let Ok(o) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Ok(h) = url::Url::parse(&format!("{}://{host}", o.scheme())) else {
+        return false;
+    };
+    matches!(o.scheme(), "http" | "https")
+        && o.username().is_empty()
+        && o.password().is_none()
+        && o.query().is_none()
+        && o.fragment().is_none()
+        && o.path() == "/"
+        && o.origin() == h.origin()
 }
 
 fn bearer_ok(head: &str, want: &str) -> bool {
@@ -1696,7 +1871,8 @@ fn dashboard_html() -> String {
 <h2>Proxy egress health</h2><table id=proxies><tr><td>loading…</td></tr></table>
 <h2>Recent runs</h2><table id=runs><tr><td>loading…</td></tr></table>
 <script>
-async function j(u){const r=await fetch(u);return r.json()}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function j(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
 async function tick(){
  try{
   const s=await j('/stats'), m=s.metrics;
@@ -1704,12 +1880,12 @@ async function tick(){
   const keys=['requests_total','requests_ok','requests_retry','requests_blocked','pages_fetched','records_extracted','records_written','records_deduped','robots_denials','domains_abandoned','jobs_completed','jobs_failed','records_quarantined','schema_drifts','pipeline_failures','storage_writes','api_requests_total','alerts_fired','alerts_notified'];
   document.getElementById('cards').innerHTML=keys.map(k=>{
     const v=m[k]||0;const hot=(k==='requests_blocked'||k==='domains_abandoned'||k==='robots_denials')&&v>0;
-    return `<div class="card${hot?' warn':''}"><b>${v}</b><span>${k}</span></div>`}).join('');
+    return `<div class="card${hot?' warn':''}"><b>${esc(v)}</b><span>${esc(k)}</span></div>`}).join('');
   document.getElementById('proxies').innerHTML='<tr><th>id</th><th>region</th><th>requests</th><th>failures</th><th>latency ewma</th><th>success ewma</th></tr>'+
-   (s.proxies||[]).map(p=>`<tr><td>${p.id}</td><td>${p.region||'direct'}</td><td>${p.requests}</td><td class="${p.failures>0?'err':''}">${p.failures}</td><td>${Math.round(p.latency_ewma_ms)}ms</td><td>${(p.success_ewma*100).toFixed(1)}%</td></tr>`).join('');
+   (s.proxies||[]).map(p=>`<tr><td>${esc(p.id)}</td><td>${esc(p.region||'direct')}</td><td>${esc(p.requests)}</td><td class="${p.failures>0?'err':''}">${esc(p.failures)}</td><td>${Math.round(p.latency_ewma_ms)}ms</td><td>${(p.success_ewma*100).toFixed(1)}%</td></tr>`).join('');
   const rs=await j('/recent');
   document.getElementById('runs').innerHTML='<tr><th>when</th><th>run</th><th>status</th><th>pages</th><th>records</th><th>blocked</th><th>ms</th><th>policy sha</th></tr>'+
-   (rs.map(r=>`<tr><td>${new Date((r.ts||0)*1000).toLocaleString()}</td><td>${r.run}</td><td class="${r.status==='ok'?'ok':'err'}">${r.status}</td><td>${r.summary?r.summary.pages_fetched:'-'}</td><td>${r.summary?r.summary.written:'-'}</td><td class="${r.summary&&r.summary.blocked>0?'warn':''}">${r.summary?r.summary.blocked:'-'}</td><td>${r.duration_ms??'-'}</td><td><code>${(r.config_sha256||'').slice(0,10)}</code></td></tr>`).join('')||'<tr><td>no runs recorded yet</td></tr>');
+   (rs.map(r=>`<tr><td>${new Date((r.ts||0)*1000).toLocaleString()}</td><td>${esc(r.run)}</td><td class="${r.status==='ok'?'ok':'err'}">${esc(r.status)}</td><td>${esc(r.summary?r.summary.pages_fetched:'-')}</td><td>${esc(r.summary?r.summary.written:'-')}</td><td class="${r.summary&&r.summary.blocked>0?'warn':''}">${esc(r.summary?r.summary.blocked:'-')}</td><td>${esc(r.duration_ms??'-')}</td><td><code>${esc(String(r.config_sha256||'').slice(0,10))}</code></td></tr>`).join('')||'<tr><td>no runs recorded yet</td></tr>');
  }catch(e){const b=document.getElementById('badge');if(b){b.textContent='offline';b.className='badge idle'}}
 }tick();setInterval(tick,5000)
 </script></body></html>

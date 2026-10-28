@@ -1,8 +1,13 @@
 # Control-plane execution (`/control/*`)
 
-The admin API's execution surface. Every route here is **fail-closed on
-authentication** (`/health` and `/live` are the only open routes in the whole
-API), and every mutating route is **idempotency-keyed**.
+The admin API's execution surface. When `admin_token` is configured, every
+route here requires its bearer token; `/health` and `/live` are the only
+routes exempt from that token. With no token configured, the API's normal
+loopback-only policy applies and a non-loopback bind is rejected. The
+crawl/export/AI submission routes accept an optional `Idempotency-Key`
+(recommended; the console sends one). Cancellation is
+state-aware but is not idempotency-keyed: cancelling a terminal job returns
+`409`.
 
 The control plane does not contain a second engine. A command is validated,
 turned into one bounded job, and handed to machinery that already exists:
@@ -61,13 +66,16 @@ can never out-run the config it was submitted against.
 
 ```json
 { "op": "export", "formats": ["csv","jsonl","xlsx","pdf","parquet","xml","zip"],
-  "dataset": "client-drop", "bundle": false, "verify": true, "max_records": 0,
+  "dataset": "client-drop", "bundle": false, "verify": true, "max_records": 10000,
   "limits": { "max_export_bytes": 268435456 } }
 ```
 
 * `formats` accepts the seven `harvest::export::ExportFormat` values
   (case- and whitespace-insensitive) and nothing else.
 * `zip` in the list (or `bundle: true`) means "bundle the rest".
+* `max_records`, when supplied, must be at least 1; `0` is rejected. Omit it or
+  send `null` to use `limits.max_records` (default 100,000); the effective
+  record count is clamped to that limit.
 * `verify: true` runs `harvest verify` over the delivery before the job reports
   success; a delivery that does not verify is a **failed** job, not a warning.
 * Over the `max_export_bytes` cap the job fails with the byte count in the

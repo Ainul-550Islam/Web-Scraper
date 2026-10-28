@@ -21,13 +21,15 @@
  *  - cancellation is per job and authorized like any other request; a job that
  *    already finished answers 409 and the page says so.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Button, Card, EmptyState, ErrorState, Field, MetricCard, PageHeader, SelectInput, StatusChip } from "../components/ui";
 import { Page } from "../components/AppShell";
 import { ArtifactList, type ArtifactRow } from "../components/patterns/ArtifactList";
-import { CommandComposer, emptyDraft, buildCommand, validateCommand, type CommandDraft, CEILINGS } from "../components/patterns/CommandComposer";
-import { JobStateBadge, JobStateLegend, canCancel, isTerminal } from "../components/patterns/JobStateBadge";
-import { apiGet, apiPost, commandIdempotencyKey, ApiError } from "../lib/api";
+import { CommandComposer } from "../components/patterns/CommandComposer";
+import { emptyDraft, buildCommand, validateCommand, type CommandDraft, CEILINGS } from "../components/patterns/CommandComposer.model";
+import { JobStateBadge, JobStateLegend } from "../components/patterns/JobStateBadge";
+import { canCancel, isTerminal } from "../components/patterns/JobState.model";
+import { apiGet, apiPost, commandIdempotencyKey, newCommandIdempotencyNonce, ApiError } from "../lib/api";
 import { usePolled } from "../hooks/usePolled";
 import { useToasts } from "../hooks/useToasts";
 import { navigate } from "../app/router";
@@ -95,6 +97,8 @@ export default function ControlJobs() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [submissionNonce, setSubmissionNonce] = useState(() => newCommandIdempotencyNonce());
+  const submitLock = useRef(false);
 
   const config = usePolled<ConfigDocument>((s) => apiGet<ConfigDocument>("/config", { signal: s }), 30_000);
   const targetIds = useMemo(
@@ -129,14 +133,19 @@ export default function ControlJobs() {
 
   const submit = useCallback(
     async (body: Record<string, unknown>) => {
+      if (submitLock.current) return;
+      submitLock.current = true;
       setSubmitting(true);
       setSubmitError(null);
       const op = String(body.op ?? "");
       // the route is one of three known strings — never assembled from input
       const route = op === "crawl" ? "/control/crawl" : op === "export" ? "/control/export" : "/control/ai";
-      const key = commandIdempotencyKey(op, body);
+      const key = commandIdempotencyKey(op, body, submissionNonce);
       try {
         const job = await apiPost<ControlJob>(route, body, { idempotencyKey: key });
+        // Rotate only after a successful response. If the outcome is uncertain,
+        // the operator can retry the exact draft with the same server key.
+        setSubmissionNonce(newCommandIdempotencyNonce());
         toasts.push("ok", `${op} accepted as ${job.id}${job.replayed === true ? " (replayed submission)" : ""}`);
         refresh();
         navigate(`/control/job?job=${encodeURIComponent(job.id)}`);
@@ -155,10 +164,11 @@ export default function ControlJobs() {
         setSubmitError(message);
         toasts.push("err", message);
       } finally {
+        submitLock.current = false;
         setSubmitting(false);
       }
     },
-    [refresh, toasts],
+    [refresh, submissionNonce, toasts],
   );
 
   const cancel = useCallback(
@@ -282,7 +292,7 @@ export default function ControlJobs() {
         onSubmit={submit}
         submitting={submitting}
         error={submitError}
-        idempotencyKey={issues.length === 0 ? commandIdempotencyKey(draft.op, buildCommand(draft)) : undefined}
+        idempotencyKey={issues.length === 0 ? commandIdempotencyKey(draft.op, buildCommand(draft), submissionNonce) : undefined}
       />
 
       <Card

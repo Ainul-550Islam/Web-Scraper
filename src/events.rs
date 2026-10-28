@@ -61,6 +61,14 @@ pub enum EventKind {
     /// its in-flight ceiling. Emitted once per tripped cap, never per
     /// denied request.
     BudgetExhausted,
+    /// A browser worker opened or reused an isolated WebDriver session.
+    BrowserSessionCreated,
+    /// A declarative browser interaction completed.
+    BrowserActionCompleted,
+    /// The page presented an observable challenge; policy decided to stop/review.
+    BrowserChallengeDetected,
+    /// A selector tree produced a bounded set of preview records.
+    SelectorPreviewCompleted,
 }
 
 impl EventKind {
@@ -86,6 +94,10 @@ impl EventKind {
             EventKind::BreakerClosed => "breaker_closed",
             EventKind::RecordQuarantined => "record_quarantined",
             EventKind::OperatorAction => "operator_action",
+            EventKind::BrowserSessionCreated => "browser_session_created",
+            EventKind::BrowserActionCompleted => "browser_action_completed",
+            EventKind::BrowserChallengeDetected => "browser_challenge_detected",
+            EventKind::SelectorPreviewCompleted => "selector_preview_completed",
         }
     }
 }
@@ -138,7 +150,8 @@ impl Bus {
 
     /// Publish one event. O(1), lock held only for a deque push; safe to
     /// call from any task, any thread, hot paths included.
-    pub fn publish(&self, kind: EventKind, job: Option<u64>, detail: Value) -> u64 {
+    pub fn publish(&self, kind: EventKind, job: Option<u64>, mut detail: Value) -> u64 {
+        crate::config::redact_observation(&mut detail);
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.published.fetch_add(1, Ordering::Relaxed);
         let ev = Event {

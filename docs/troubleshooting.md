@@ -201,11 +201,12 @@ docker run --rm -v "$V:/data" alpine chown 10001 /data
 ```
 
 or bind-mount a host dir you `chown 10001`.
-**Container killed at `docker stop` mid-write** — expected: SIGTERM isn't
-drained (SIGINT is). Compose already sets `stop_signal: SIGINT`; for raw
-`docker run`, add `--stop-signal SIGINT`. Worst case (hard kill): sinks are
-line/txn atomic and the ckpt is whole-file — resume sees an intact older
-checkpoint or none; nothing half-written.
+**Container stopped during a write** — SIGINT and SIGTERM both trigger the
+engine's graceful drain; Compose sends SIGTERM and allows 45 seconds. A raw
+`docker run` also defaults to SIGTERM, so no signal override is needed. A
+forced SIGKILL or host failure can still interrupt shutdown: sinks are
+line/transaction atomic and the checkpoint is whole-file, so resume sees an
+intact older checkpoint or none rather than a partial checkpoint.
 **Image build succeeds, container exits instantly with the validation error**
 — the config in `/etc/harvest` isn't valid in this environment (missing
 env). The exit message names the exact rule; see the env-var entry above.

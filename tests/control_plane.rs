@@ -58,7 +58,7 @@ fn http_bytes(
         .map(|t| format!("authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nhost: x\r\n{auth}content-length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-length: {}\r\n\r\n",
         body.len()
     );
     sock.write_all(req.as_bytes()).unwrap();
@@ -589,7 +589,7 @@ fn http_key(
         .map(|k| format!("idempotency-key: {k}\r\n"))
         .unwrap_or_default();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nhost: x\r\n{auth}{idem}content-length: {}\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nhost: localhost\r\n{auth}{idem}content-length: {}\r\n\r\n{body}",
         body.len()
     );
     sock.write_all(req.as_bytes()).unwrap();
@@ -735,7 +735,10 @@ fn cancelling_a_finished_job_is_a_conflict() {
     assert!(body.contains("already completed"), "{body}");
     // the audit line records the refusal
     let (_, abody, _) = http(&fx.addr, "GET", "/audit?limit=20", Some(TOK), "");
-    assert!(abody.contains("control.cancel") || abody.contains("conflict") || true);
+    assert!(
+        abody.contains("control.cancel") && abody.contains("rejected"),
+        "{abody}"
+    );
 }
 
 #[test]

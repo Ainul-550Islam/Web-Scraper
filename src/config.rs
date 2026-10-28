@@ -4,6 +4,12 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Maximum body size for one HTTP response. Larger values are rejected before
+/// a run can allocate an unbounded per-fetch buffer.
+pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
+/// Conservative aggregate reservation for simultaneously buffered responses.
+pub const MAX_IN_FLIGHT_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Whole-engine configuration. Loaded from a single JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -130,6 +136,9 @@ pub struct Config {
     /// SLO alerts evaluated after every run (both `run` and `serve`).
     pub alerts: AlertCfg,
 
+    /// Opt-in W3C WebDriver runtime. HTTP-only remains the default transport.
+    #[serde(default)]
+    pub browser: crate::browser::config::BrowserConfig,
     pub proxies: Vec<ProxyCfg>,
     pub targets: Vec<TargetCfg>,
     pub output: SinkCfg,
@@ -152,7 +161,7 @@ pub struct Config {
 /// Per-run SLO alerts. Fires a webhook POST with the offending reasons when
 /// thresholds are breached. `webhook_url` unset (or empty) disables alerts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AlertCfg {
     pub webhook_url: Option<String>,
     /// Which conditions fire. Supported: "run_error", "no_data", "high_block_rate".
@@ -191,7 +200,7 @@ impl AlertCfg {
 
 /// SLO thresholds for a single target within a run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TargetSlo {
     /// Alert when records written < this (0 = alert only at zero).
     pub min_records: u64,
@@ -201,7 +210,7 @@ pub struct TargetSlo {
 
 /// Scheduler policy for repeated runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScheduleCfg {
     /// Seconds between run starts. 0 = start the next run immediately.
     pub every_secs: u64,
@@ -260,6 +269,7 @@ impl Default for Config {
             redis_url: None,
             admin_token: None,
             alerts: AlertCfg::default(),
+            browser: crate::browser::config::BrowserConfig::default(),
             proxies: Vec::new(),
             targets: Vec::new(),
             output: SinkCfg::default(),
@@ -275,7 +285,7 @@ impl Default for Config {
 /// behavior the engine had before this module existed, so opting in is
 /// strictly additive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SchedulingCfg {
     /// `"fifo"` (default, legacy-exact), `"priority"` (High before Normal
     /// before Low, FIFO within a class), or `"fair"` (round-robin across
@@ -317,7 +327,7 @@ impl Default for SchedulingCfg {
 /// transport/5xx failures, jobs for that host are skipped (failed to the
 /// DLQ path) for `cooldown_secs`, then one probe request tests recovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BreakerOpts {
     pub min_consecutive: u32,
     pub cooldown_secs: u64,
@@ -337,7 +347,7 @@ impl Default for BreakerOpts {
 
 /// Per-domain pacing. Enforced through a token bucket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DomainPolicy {
     /// Sustained requests per second to a single host.
     pub requests_per_sec: f64,
@@ -358,7 +368,7 @@ impl Default for DomainPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProxyCfg {
     pub id: String,
     /// e.g. "http://user:pass@fra-1.gateway.internal:8000" or "socks5h://...".
@@ -378,7 +388,7 @@ impl Default for ProxyCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TargetCfg {
     pub id: String,
     pub start_url: String,
@@ -410,6 +420,12 @@ pub struct TargetCfg {
     /// Record schema policy (transforms pipeline still applies; this is the
     /// validation layer on top). Default `off` = no schema enforcement.
     pub schema: SchemaCfg,
+    /// Opt-in browser transport. If false, the existing HTTP fetcher is used.
+    #[serde(default)]
+    pub browser: crate::browser::config::TargetBrowserConfig,
+    /// Optional hierarchical selector tree; legacy `extract` rules remain supported.
+    #[serde(default)]
+    pub selector_tree: Option<crate::selector::ast::SelectorTree>,
 }
 
 fn default_mode() -> String {
@@ -432,11 +448,14 @@ impl Default for TargetCfg {
             sitemap: false,
             sitemap_url: None,
             schema: SchemaCfg::default(),
+            browser: crate::browser::config::TargetBrowserConfig::default(),
+            selector_tree: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldCfg {
     /// CSS selector, e.g. "h1", "span.price", "a.next". (html mode)
     #[serde(default)]
@@ -463,7 +482,7 @@ pub struct FieldCfg {
 /// value and records the reason — which becomes a quarantine decision when
 /// the target enforces its schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransformCfg {
     Trim,
     Lowercase,
@@ -587,7 +606,7 @@ pub enum MaskStrategy {
 /// Record schema for a target: what fields must look like when they reach
 /// the sink. `off` (default) changes nothing about today's behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SchemaCfg {
     /// off | coerce | strict — coerce repairs what it can (and counts a
     /// drift); strict quarantines the whole record on any violation.
@@ -602,7 +621,7 @@ pub struct SchemaCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SinkCfg {
     Jsonl {
         path: PathBuf,
@@ -679,6 +698,7 @@ impl Config {
         "audit_path",
         "block_backoff_secs",
         "block_breaker_count",
+        "browser",
         "ckpt_every_pages",
         "ckpt_every_secs",
         "ckpt_path",
@@ -843,11 +863,15 @@ impl Config {
                 self.concurrency
             ));
         }
-        if self.max_response_bytes > 64 * 1024 * 1024 {
+        let response_reservation = self
+            .max_response_bytes
+            .saturating_mul(self.concurrency.clamp(1, 64) as u64);
+        if response_reservation > 256 * 1024 * 1024 {
             w.push(format!(
-                "max_response_bytes={} exceeds 64 MiB — memory per in-flight fetch \
-                 grows with it (worst case: bytes * concurrency)",
-                self.max_response_bytes
+                "max_response_bytes={} × {} effective workers reserves up to {} MiB for response bodies — reduce concurrency or the body cap if memory is tight",
+                self.max_response_bytes,
+                self.concurrency.clamp(1, 64),
+                response_reservation / (1024 * 1024)
             ));
         }
         if self.user_agent.to_lowercase().contains("mozilla") {
@@ -861,8 +885,69 @@ impl Config {
     }
 
     pub fn validate(&mut self) -> Result<()> {
+        self.browser.validate()?;
+        if self
+            .browser
+            .user_agent_override
+            .as_ref()
+            .is_some_and(|ua| ua != &self.user_agent)
+        {
+            bail!(
+                "browser.user_agent_override must match the configured honest user_agent exactly"
+            );
+        }
+        if self.browser.enabled && !cfg!(feature = "browser") {
+            bail!(
+                "browser runtime is enabled in config but this binary lacks `--features browser`"
+            );
+        }
+        if let Some(url) = &self.redis_url {
+            validate_redis_url(url)?;
+        }
+        if self.targets.len() > 128 {
+            bail!("configuration supports at most 128 targets");
+        }
+        if self.targets.iter().any(|t| t.extract.len() > 1024) {
+            bail!("a target supports at most 1024 extract fields");
+        }
         if self.targets.is_empty() {
             bail!("no targets configured");
+        }
+        if self.user_agent.trim().is_empty()
+            || reqwest::header::HeaderValue::from_str(&self.user_agent).is_err()
+        {
+            bail!("user_agent must be a non-empty, valid HTTP header with an honest bot identity");
+        }
+        fn http_url(label: &str, value: &str) -> Result<()> {
+            if value.len() > 8192 || value.chars().any(char::is_control) {
+                bail!("{label} must be at most 8192 bytes without control characters");
+            }
+            let u = url::Url::parse(value).with_context(|| format!("{label}: invalid URL"))?;
+            if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none() {
+                bail!("{label} must be an absolute http(s) URL with a host");
+            }
+            Ok(())
+        }
+        fn rate_policy(label: &str, p: &DomainPolicy) -> Result<()> {
+            if !p.requests_per_sec.is_finite() || p.requests_per_sec <= 0.0 {
+                bail!("{label}.requests_per_sec must be finite and greater than zero");
+            }
+            if p.requests_per_sec < 1.0 / 3600.0 {
+                bail!("{label}.requests_per_sec must be at least one request/hour; use schedule for longer intervals");
+            }
+            if p.burst == 0 {
+                bail!("{label}.burst must be at least 1 (zero never grants a request permit)");
+            }
+            if p.min_interval_ms > 3_600_000 {
+                bail!(
+                    "{label}.min_interval_ms must be <= 3600000; use schedule for longer intervals"
+                );
+            }
+            Ok(())
+        }
+        rate_policy("default_policy", &self.default_policy)?;
+        for (host, policy) in &self.domain_policies {
+            rate_policy(&format!("domain_policies.{host}"), policy)?;
         }
         if self.respect_robots && self.user_agent.to_lowercase().contains("mozilla") {
             bail!(
@@ -903,16 +988,43 @@ impl Config {
             }
         }
         for t in &self.targets {
-            url::Url::parse(&t.start_url)
-                .with_context(|| format!("target {}: invalid start_url", t.id))?;
-            if t.extract.is_empty() {
-                bail!("target {}: no extract rules", t.id);
+            if t.max_pages == 0 {
+                bail!(
+                    "target {}: max_pages = 0 collects nothing; raise the target budget or remove the target",
+                    t.id
+                );
+            }
+            http_url(&format!("target {} start_url", t.id), &t.start_url)?;
+            t.browser
+                .validate()
+                .map_err(|e| anyhow::anyhow!("target {}: {e}", t.id))?;
+            if t.browser.enabled && !self.browser.enabled {
+                bail!(
+                    "target {} requests browser transport but browser.enabled is false",
+                    t.id
+                );
+            }
+            if t.browser.enabled && !cfg!(feature = "browser") {
+                bail!("target {} requests browser transport but this binary lacks `--features browser`", t.id);
+            }
+            if let Some(tree) = &t.selector_tree {
+                tree.validate()
+                    .map_err(|e| anyhow::anyhow!("target {} selector_tree: {e}", t.id))?;
+            }
+            if let Some(selector) = &t.link_selector {
+                scraper::Selector::parse(selector)
+                    .map_err(|_| anyhow::anyhow!("target {}: invalid link_selector", t.id))?;
+            }
+            if t.extract.is_empty() && t.selector_tree.is_none() {
+                bail!("target {}: no extract rules or selector_tree", t.id);
             }
             // Transform + schema pipeline: compiled here so `harvest
             // validate` catches bad regexes/types, not the crawl loop at
             // 03:00. Same constructor the engine uses at runtime.
-            crate::transform::Pipeline::compile(&t.extract)
-                .map_err(|e| anyhow::anyhow!("target {}: {e:#}", t.id))?;
+            if !t.extract.is_empty() {
+                crate::transform::Pipeline::compile(&t.extract)
+                    .map_err(|e| anyhow::anyhow!("target {}: {e:#}", t.id))?;
+            }
             match t.schema.enforce.as_str() {
                 "off" | "coerce" | "strict" => {}
                 other => bail!(
@@ -955,8 +1067,7 @@ impl Config {
                 // harmless: link_selector only applies when follow_links is set
             }
             if let Some(su) = &t.sitemap_url {
-                url::Url::parse(su)
-                    .with_context(|| format!("target {}: invalid sitemap_url", t.id))?;
+                http_url(&format!("target {} sitemap_url", t.id), su)?;
             }
             for (field, rule) in &t.extract {
                 if t.mode == "json" {
@@ -1004,8 +1115,34 @@ impl Config {
                 if dsn.trim().is_empty() {
                     bail!("postgres sink: dsn must not be empty");
                 }
+                #[cfg(feature = "postgres")]
+                crate::pgsink::validate_dsn(dsn)?;
                 #[cfg(not(feature = "postgres"))]
                 bail!("postgres sink requested but binary lacks `--features postgres`");
+            }
+            SinkCfg::Http {
+                url,
+                timeout_secs,
+                batch_max,
+                auth,
+            } => {
+                http_url("HTTP sink url", url)?;
+                if !(1..=600).contains(timeout_secs) {
+                    bail!("HTTP sink timeout_secs must be 1..=600");
+                }
+                if !(1..=1024).contains(batch_max) {
+                    bail!("HTTP sink batch_max must be 1..=1024");
+                }
+                if auth
+                    .as_deref()
+                    .is_some_and(|a| reqwest::header::HeaderValue::from_str(a).is_err())
+                {
+                    bail!("HTTP sink auth is not a valid HTTP header");
+                }
+            }
+            #[cfg(not(feature = "sqlite"))]
+            SinkCfg::Sqlite { .. } => {
+                bail!("sqlite sink requested but binary lacks `--features sqlite`");
             }
             SinkCfg::Dataset { partition, .. } if !matches!(partition.as_str(), "day" | "none") => {
                 bail!("dataset sink: partition must be \"day\" or \"none\", got \"{partition}\"");
@@ -1044,7 +1181,22 @@ impl Config {
         }
         if self.max_response_bytes < 4096 {
             bail!(
-                "max_response_bytes below 4096 cannot hold a real page; use 0-default or raise it"
+                "max_response_bytes={} is below the 4096-byte minimum; raise it to fit a real page",
+                self.max_response_bytes
+            );
+        }
+        if self.max_response_bytes > MAX_RESPONSE_BYTES_CEILING {
+            bail!(
+                "max_response_bytes={} exceeds the hard 64 MiB per-response ceiling",
+                self.max_response_bytes
+            );
+        }
+        let effective_workers = self.concurrency.clamp(1, 64) as u64;
+        let response_reservation = self.max_response_bytes.saturating_mul(effective_workers);
+        if response_reservation > MAX_IN_FLIGHT_RESPONSE_BYTES {
+            bail!(
+                "max_response_bytes × effective workers reserves {} MiB, above the 1024 MiB in-flight response budget; reduce the response cap or concurrency",
+                response_reservation / (1024 * 1024)
             );
         }
         if self.max_pages == 0 {
@@ -1128,8 +1280,18 @@ impl Config {
                 .rsplit_once(':')
                 .and_then(|(_, p)| p.parse::<u16>().ok())
                 .is_some();
+            if let Some(token) = &self.admin_token {
+                if token.len() < 12
+                    || token.trim() != token
+                    || !token.bytes().all(|b| b.is_ascii_graphic())
+                    || token.len() > 512
+                    || reqwest::header::HeaderValue::from_str(token).is_err()
+                {
+                    bail!("admin_token must be at least 12 and at most 512 characters and a valid HTTP header value");
+                }
+            }
             if !addr.is_empty() {
-                if !port_ok {
+                if host.is_empty() || !port_ok {
                     bail!("metrics_addr `{addr}` must be host:PORT (port 0..=65535; 0 = random)");
                 }
                 let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
@@ -1258,36 +1420,54 @@ impl Config {
     pub fn policy_for(&self, host: &str) -> DomainPolicy {
         self.domain_policies
             .get(host)
+            .or_else(|| {
+                self.domain_policies
+                    .iter()
+                    .find(|(key, _)| {
+                        key.trim_end_matches('.')
+                            .eq_ignore_ascii_case(host.trim_end_matches('.'))
+                    })
+                    .map(|(_, policy)| policy)
+            })
             .cloned()
             .unwrap_or_else(|| self.default_policy.clone())
     }
 }
 
-/// Remove credentials from a URL for logging: `http://u:p@host:80/x?y=1`
-/// becomes `http://u:***@host:80` — once a URL carries credentials we treat
-/// the whole tail as sensitive. A URL WITHOUT credentials passes through
-/// unchanged (nothing hidden). An unparseable string is reduced to its
-/// `scheme://host` origin at best, or `[redacted]`: the string itself may be
-/// the secret, so we never echo it back raw.
+/// Remove credentials from a URL for logging and persisted observations:
+/// `http://u:p@host:80/x?y=1` becomes `http://host:80`. Usernames are
+/// credentials too, so no userinfo survives. Once a URL carries userinfo we
+/// treat its entire tail as sensitive. A URL WITHOUT userinfo passes through
+/// unchanged except that known-sensitive query values are masked. An
+/// unparseable string is reduced to its `scheme://host` origin at best, or
+/// `[redacted]`: the string itself may be the secret, so we never echo it raw.
 pub fn redact_credentials(s: &str) -> String {
+    if s.len() > 8192 {
+        return redact_url_origin(s);
+    }
     if let Ok(u) = url::Url::parse(s) {
         if u.password().is_some() || !u.username().is_empty() {
-            let mut out = format!("{}://", u.scheme());
-            if !u.username().is_empty() {
-                out.push_str(u.username());
-                out.push_str(if u.password().is_some() { ":***" } else { "" });
-                out.push('@');
-            }
-            if let Some(h) = u.host_str() {
-                out.push_str(h);
-                if let Some(p) = u.port() {
-                    out.push(':');
-                    out.push_str(&p.to_string());
-                }
-            }
-            // No path: on proxy/webhook URLs the tail past the host carries
-            // as much secret weight as the password in many setups.
-            return out;
+            return redact_url_origin(s);
+        }
+        let pairs: Vec<(String, String)> = u
+            .query_pairs()
+            .map(|(k, v)| {
+                let private = sensitive_name(&k);
+                (
+                    k.into_owned(),
+                    if private {
+                        "***".into()
+                    } else {
+                        v.into_owned()
+                    },
+                )
+            })
+            .collect();
+        if pairs.iter().any(|(_, v)| v == "***") {
+            let mut safe = u.clone();
+            safe.query_pairs_mut().clear().extend_pairs(pairs);
+            safe.set_fragment(None);
+            return safe.to_string();
         }
         return s.to_string();
     }
@@ -1335,3 +1515,135 @@ pub(crate) fn hash_bytes(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Remote Redis must use platform-verified TLS; no `#insecure` bypass.
+pub(crate) fn validate_redis_url(value: &str) -> Result<()> {
+    let url =
+        url::Url::parse(value).map_err(|_| anyhow::anyhow!("redis_url is not a valid endpoint"))?;
+    if !matches!(url.scheme(), "redis" | "rediss")
+        || url.host().is_none()
+        || url.fragment().is_some()
+    {
+        bail!(
+            "redis_url must use redis:// or rediss:// with a host and without insecure/fragments"
+        );
+    }
+    let local = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        None => false,
+    };
+    if !local && url.scheme() != "rediss" {
+        bail!("remote Redis requires rediss:// (verified TLS; plaintext is loopback-only)");
+    }
+    Ok(())
+}
+
+/// Starts are explicitly approved; every other URL must stay in origin,
+/// credentials, target path scope and depth, including recovered work.
+pub(crate) fn approved_url(target: &TargetCfg, url: &url::Url, depth: usize) -> bool {
+    let Ok(start) = url::Url::parse(&target.start_url) else {
+        return false;
+    };
+    if url.as_str().len() > 8192
+        || depth > target.max_depth
+        || url.origin() != start.origin()
+        || url.username() != start.username()
+        || url.password() != start.password()
+    {
+        return false;
+    }
+    url == &start
+        || ((target.include.is_empty() || target.include.iter().any(|s| url.as_str().contains(s)))
+            && !target.exclude.iter().any(|s| url.as_str().contains(s)))
+}
+
+pub(crate) fn redact_observation_text(text: &str) -> String {
+    if text.to_ascii_lowercase().starts_with("bearer ") {
+        return "Bearer ***".into();
+    }
+    static URL_MENTIONS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = URL_MENTIONS.get_or_init(|| {
+        regex::Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+"#)
+            .expect("static URL mention expression is valid")
+    });
+    re.replace_all(text, |captures: &regex::Captures<'_>| {
+        redact_credentials(captures.get(0).expect("whole URL match").as_str())
+    })
+    .into_owned()
+}
+
+pub(crate) fn sensitive_name(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passwd"
+            | "pwd"
+            | "secret"
+            | "credential"
+            | "credentials"
+            | "auth"
+            | "authentication"
+            | "authkey"
+            | "user"
+            | "username"
+            | "email"
+            | "oauth"
+            | "token"
+            | "admintoken"
+            | "accesstoken"
+            | "refreshtoken"
+            | "authtoken"
+            | "apikey"
+            | "accesskey"
+            | "secretaccesskey"
+            | "authorization"
+            | "cookie"
+            | "setcookie"
+            | "clientsecret"
+            | "signature"
+            | "sig"
+            | "jwt"
+            | "session"
+            | "sessionid"
+            | "dsn"
+            | "xamzsignature"
+            | "xamzcredential"
+            | "xamzsecuritytoken"
+    )
+}
+/// Observation-only. Real requests and deterministic record field values are
+/// never modified by this function.
+pub(crate) fn redact_observation(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if sensitive_name(key) {
+                    *value = serde_json::Value::String("***".into());
+                } else {
+                    redact_observation(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_observation(value);
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = redact_observation_text(text);
+        }
+        _ => {}
+    }
+}

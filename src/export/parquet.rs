@@ -373,7 +373,8 @@ pub fn write_parquet(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "export".to_string())
     ));
-    let mut f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let mut f =
+        crate::export_io::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     let mut sha = Sha256::new();
 
     f.write_all(b"PAR1")?;

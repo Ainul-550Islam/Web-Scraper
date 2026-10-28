@@ -91,7 +91,7 @@ impl ApiError {
         Self {
             status: 405,
             code: "method_not_allowed",
-            message: format!("{method} is not supported on {path}; this API is read-mostly (only POST /alerts/ack and POST /ops/note mutate)"),
+            message: format!("{method} is not supported on {path}."),
         }
     }
     pub fn payload_too_large(limit: u64) -> Self {
@@ -982,6 +982,15 @@ pub fn runs_listing(
 /// its string value replaced. Secrets never appear in any diagnostic output.
 const SECRET_KEYS: &[&str] = &[
     "admin_token",
+    "auth",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "passwd",
+    "credential",
     "attest_key_path",
     "token",
     "password",

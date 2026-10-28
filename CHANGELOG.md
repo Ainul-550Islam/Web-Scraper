@@ -322,8 +322,10 @@ v0.7 (pre-v0.7 development predates this repository).
   `warning:` lines in `harvest validate`, and as `_warnings` in
   `harvest config inspect` / `GET /config`. `production_audit()` — five
   soft checks (robots off, >5 req/s pacing, retries ≥ 8, concurrency
-  > 64, >64 MiB responses) — feeds the same two surfaces (`_production`)
-  plus `_backends` (which storages the binary was compiled with). The
+  > 64, estimated response-buffer reservation >256 MiB) — feeds the same
+  two surfaces (`_production`) plus `_backends` (which storages the binary
+  was compiled with). Hard validation refuses a single-response cap above
+  64 MiB or cap × effective workers above 1 GiB. The
   shipped default config audits clean, pinned by test; warnings never
   move an exit code.
 - Delivery integrity (`export`, new `harvest verify`): `--max-part-bytes`

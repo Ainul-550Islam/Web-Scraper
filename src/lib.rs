@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! harvest — a compliance-first data-collection engine.
 //!
 //! Design pillars:
@@ -39,10 +41,14 @@ pub mod api_models;
 pub mod artifact;
 pub mod audit;
 pub mod breaker;
+/// Browser automation and authoring subsystem; process execution is opt-in via `browser`.
+pub mod browser;
 /// Bounded resource budgets (acquire/release protocol shared by in-flight
 /// holds and consumption caps).
 pub mod budget;
 pub mod cache;
+/// Challenge detection and authorized provider interfaces.
+pub mod challenge;
 pub mod ckpt;
 pub mod config;
 /// Bounded crawl planning: discovery, admission, and document/resource indexes.
@@ -51,6 +57,8 @@ pub mod control;
 pub mod crawl;
 pub mod document;
 pub mod media;
+/// Nested selector tree model and extraction engine.
+pub mod selector;
 
 pub mod ai_job;
 #[cfg(feature = "redis")]
@@ -61,9 +69,13 @@ pub mod events;
 pub mod exec;
 pub mod execution;
 pub mod export;
+mod export_io;
 pub mod export_job;
 pub mod extract;
 pub mod fetcher;
+mod fsutil;
+#[cfg(test)]
+mod hardening_tests;
 pub mod health;
 /// Typed identifiers and shared value semantics (ids, timestamps, partitions).
 pub mod ids;
@@ -90,13 +102,16 @@ pub mod schema;
 pub mod search;
 pub mod sign;
 pub mod sink;
+mod sink_lifecycle;
 pub mod sitemap;
+mod source_io;
 pub mod stream;
 pub mod supervisor;
 /// Dev-only test harness (unit tests + `devtools` feature; never in normal builds).
 #[cfg(any(test, feature = "devtools"))]
 pub mod testutil;
 pub mod transform;
+mod work_cancel;
 
 pub use config::Config;
 pub use engine::{run, Summary};

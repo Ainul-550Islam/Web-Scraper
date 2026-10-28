@@ -24,13 +24,14 @@ marketing numbers: everything here points at a command you can run.
 
 | claim | how you confirm |
 |---|---|
-| engine tests | `cargo test` (default) + `cargo test --all-features` — suite counts in [testing.md](testing.md) |
+| engine tests | `cargo test --all-targets --all-features` — suite counts and live-service opt-in details in [testing.md](testing.md) |
 | console unit/contract | `cd web && npm test` (jsdom, fixture-backed) |
 | console static gates | `npm run typecheck && npm run lint` |
 | built app + live API | `npm run build && npm run smoke` |
 | full buyer flow | `npm run e2e:buyer` → `BUYER E2E: 18 passed, 0 failed` |
-| docs integrity | `make links` → 0 broken links (tool: `tools/check_links.py`) |
-| package contents | `cargo package --list` (include list is explicit in Cargo.toml) |
+| docs integrity | `make links` → 302 relative links checked, 0 broken (tool: `tools/check_links.py`) |
+| package contents | `cargo package --locked --allow-dirty --list` (include list is explicit in Cargo.toml) |
+| Docker/Compose deployment | engine and console images build; all four Compose services start healthy; API auth, Prometheus scrape, Grafana datasource/dashboard verified locally |
 
 ## Known limits (not gaps in docs — deliberate scope)
 
@@ -44,8 +45,10 @@ marketing numbers: everything here points at a command you can run.
 - Postgres/Redis paths need their servers + `--features postgres|redis`.
 - No Kubernetes/operator tooling; single-binary scheduler or per-host
   `worker` processes only.
-- `docker/` compose files are static-validated in CI context; building the
-  image inside this sandbox was UNVERIFIED (no Docker daemon available).
+- The Docker Compose stack was exercised locally using prebuilt engine/console
+  images; the live smoke covered health, auth, scrape and dashboard wiring.
+  This is not a production deployment. Kubernetes was not deployed, and
+  external source crawling/production credentials were not exercised.
 
 ## Release engineering hygiene
 

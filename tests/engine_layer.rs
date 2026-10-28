@@ -631,15 +631,24 @@ async fn drain_flag_produces_clean_shutdown_and_drain_log() {
         .collect();
     assert!(kinds.contains(&"shutdown_started"));
     assert_eq!(kinds.last().copied(), Some("shutdown_completed"));
-    // Drain kept it finite: far fewer than the 40-page budget, yet every
-    // started job got a terminal event.
+    // Drain kept it finite: far fewer than the 40-page budget. Each started
+    // job either reached a terminal event or was explicitly returned to the
+    // pending queue when operator cancellation interrupted its request.
     assert!(summary.written < 40);
     let started = kinds.iter().filter(|k| **k == "job_started").count();
     let finished = kinds
         .iter()
         .filter(|k| **k == "job_completed" || **k == "job_failed" || **k == "job_expired")
         .count();
-    assert_eq!(started, finished, "no job left dangling across shutdown");
+    let requeued = evs
+        .iter()
+        .filter(|event| event["kind"] == "job_submitted" && event["detail"]["requeued"] == true)
+        .count();
+    assert_eq!(
+        started,
+        finished + requeued,
+        "every started job must finish or be represented as pending on shutdown"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

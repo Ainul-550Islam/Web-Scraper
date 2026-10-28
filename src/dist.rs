@@ -9,9 +9,10 @@
 //! * Cross-process dedup: enqueue-dedup and content fingerprints live in
 //!   Redis sets, so two shards can race on the same host without writing the
 //!   same page twice.
-//! * Politeness is *shared*: the per-host fixed-window limiter counts
-//!   requests across every worker, so N workers do not multiply the agreed
-//!   request rate. robots.txt is fetched once and cached in Redis with a TTL.
+//! * Politeness is *shared*: a Redis-time fractional token bucket, minimum
+//!   spacing, robots crawl-delay floor and refusal backoff are atomic across
+//!   workers, so adding shards does not multiply the agreed request rate.
+//!   robots.txt is fetched once and cached in Redis with a TTL.
 //! * A running job holds a short-TTL *lease* heartbeat (`lease:<digest>`)
 //!   naming its holder (`<worker>-s<seq>-<hex>`); `sweep_inflight` — the
 //!   startup stray-reclaimer — skips anything whose lease is still fresh, so
@@ -38,9 +39,10 @@ use sha2::Digest;
 use crate::breaker::Permit;
 use crate::config::Config;
 use crate::engine::ua_token;
+use crate::engine::ExtractMode;
 use crate::events::EventKind;
 use crate::exec::{RequestContext, RequestPlan};
-use crate::extract::{self, Extractor};
+use crate::extract::{self, Extractor, JsonExtractor};
 use crate::fetcher::{FetchError, Fetcher};
 use crate::ids::{is_safe_key_token, LeaseId, WorkerId};
 use crate::metrics::Metrics;
@@ -85,11 +87,41 @@ pub struct Job {
     pub expires_at: Option<u64>,
 }
 
+fn is_prequarantined_corrupt_payload(job: &Job) -> bool {
+    job.url.is_empty() && job.target == usize::MAX && job.attempts == u32::MAX
+}
+
+fn dead_letter_entry(
+    queue_prefix: &str,
+    job: &Job,
+    target_id: Option<&str>,
+    reason: &str,
+) -> serde_json::Value {
+    let safe_url = crate::config::redact_credentials(&job.url);
+    let mut entry = serde_json::json!({
+        "url": safe_url.clone(),
+        "queue": queue_prefix,
+        "target_index": job.target,
+        "reason": crate::config::redact_observation_text(reason),
+        "attempts": job.attempts,
+    });
+    if let Some(target_id) = target_id {
+        entry["target"] = target_id.into();
+    }
+    // Redaction can remove credentials or sensitive query values that are
+    // required to reproduce the request. Such entries must never be retried
+    // with a different, unauthenticated URL.
+    if safe_url != job.url {
+        entry["retryable"] = false.into();
+    }
+    entry
+}
+
 /// Thin wrapper over a multiplexed Redis connection with harvest's key
 /// layout. All methods are safe to interleave on one connection.
 #[derive(Clone)]
 pub struct Queue {
-    con: redis::aio::MultiplexedConnection,
+    con: redis::aio::ConnectionManager,
     prefix: String,
     /// Lease heartbeat TTL in seconds (tests shorten it; workers default).
     lease_ttl: u64,
@@ -105,12 +137,20 @@ impl Queue {
                 "queue prefix {prefix:?} must be a redis key token: 1..=128 bytes of                  letters, digits, '_', '-', ':'"
             );
         }
+        crate::config::validate_redis_url(redis_url)?;
         let client = redis::Client::open(redis_url.to_string())
-            .with_context(|| format!("bad redis url {redis_url}"))?;
-        let con = client
-            .get_multiplexed_async_connection()
-            .await
-            .context("redis connect failed")?;
+            .map_err(|_| anyhow::anyhow!("invalid Redis endpoint"))?;
+        let options = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(Duration::from_secs(5))
+            .set_response_timeout(Duration::from_secs(10))
+            .set_number_of_retries(2);
+        let con = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.get_connection_manager_with_config(options),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Redis connect deadline exceeded"))?
+        .map_err(|_| anyhow::anyhow!("Redis connect failed (endpoint credentials are redacted)"))?;
         Ok(Self {
             con,
             prefix: prefix.to_string(),
@@ -146,24 +186,23 @@ impl Queue {
             Err(e) => {
                 // Corrupt payload: quarantine it, never block the queue.
                 tracing::warn!(%e, "undecodable job; moving to dlq");
-                let entry =
-                    serde_json::json!({ "url": "", "reason": "corrupt-payload", "attempts": null });
-                let _: () = self
-                    .con
-                    .rpush(self.k("dlq"), entry.to_string())
-                    .await
-                    .unwrap_or_default();
-                let _: () = self
-                    .con
-                    .lrem(self.k("inflight"), 1, raw.clone())
-                    .await
-                    .unwrap_or_default();
+                let entry = serde_json::json!({
+                    "url": "",
+                    "reason": "corrupt-payload",
+                    "attempts": null,
+                    "queue": self.prefix.clone(),
+                });
+                // Do not discard a corrupt job if it could not be parked in
+                // the DLQ. RPush first: an LREM failure can cause a duplicate
+                // quarantine after a later sweep, but never a silent loss.
+                let _: () = self.con.rpush(self.k("dlq"), entry.to_string()).await?;
+                let _: i64 = self.con.lrem(self.k("inflight"), 1, raw.clone()).await?;
                 Ok(Some((
                     raw,
                     Job {
                         url: String::new(),
                         depth: 0,
-                        target: 0,
+                        target: usize::MAX,
                         expires_at: None,
                         attempts: u32::MAX,
                     },
@@ -185,12 +224,16 @@ impl Queue {
     }
 
     pub async fn dead(&mut self, job: &Job, reason: &str) -> Result<()> {
-        let entry = serde_json::json!({
-            "url": job.url,
-            "target": self.prefix.clone(),
-            "reason": reason,
-            "attempts": job.attempts,
-        });
+        self.dead_for_target(job, None, reason).await
+    }
+
+    pub async fn dead_for_target(
+        &mut self,
+        job: &Job,
+        target_id: Option<&str>,
+        reason: &str,
+    ) -> Result<()> {
+        let entry = dead_letter_entry(&self.prefix, job, target_id, reason);
         let _: () = self.con.rpush(self.k("dlq"), entry.to_string()).await?;
         Ok(())
     }
@@ -248,34 +291,164 @@ impl Queue {
         Ok(added == 1)
     }
 
-    /// Shared per-host fixed-window limiter: at most `per_sec` requests per
-    /// wall-clock second across *all* workers. Returns early if `stop` is
-    /// set so shutdown stays prompt.
+    /// Fractional-safe token bucket, min-spacing, crawl-delay and refusal
+    /// floor, atomically shared by all workers using Redis server time.
     pub async fn wait_host(
         &mut self,
         host: &str,
         per_sec: f64,
         stop: Option<&Arc<AtomicBool>>,
     ) -> Result<()> {
-        if !per_sec.is_finite() || per_sec <= 0.0 {
+        self.wait_policy(
+            host,
+            &crate::config::DomainPolicy {
+                requests_per_sec: per_sec,
+                burst: 1,
+                min_interval_ms: 0,
+            },
+            stop,
+        )
+        .await
+    }
+    pub(crate) async fn wait_policy(
+        &mut self,
+        host: &str,
+        p: &crate::config::DomainPolicy,
+        stop: Option<&Arc<AtomicBool>>,
+    ) -> Result<()> {
+        if !p.requests_per_sec.is_finite() || p.requests_per_sec < 1.0 / 3600.0 || p.burst == 0 {
+            anyhow::bail!("invalid shared pacing policy");
+        }
+        const LUA: &str = r#"
+local tm = redis.call('TIME')
+local now = tonumber(tm[1]) * 1000 + tonumber(tm[2]) / 1000
+local key = KEYS[1]
+if redis.call('HGET', key, 'abandoned') == '1' then return {-1, 0} end
+local rate = tonumber(ARGV[1]) / 1000
+local cap = tonumber(ARGV[2])
+local spacing = math.max(tonumber(ARGV[3]), tonumber(redis.call('HGET', key, 'delay') or '0'))
+local blocked = tonumber(redis.call('HGET', key, 'blocked') or '0')
+local at = tonumber(redis.call('HGET', key, 'at') or tostring(now))
+local tokens = tonumber(redis.call('HGET', key, 'tokens') or tostring(cap))
+tokens = math.min(cap, tokens + math.max(0, now - at) * rate)
+local last = tonumber(redis.call('HGET', key, 'last') or '0')
+local wait = math.max(0, blocked - now, last + spacing - now)
+if tokens < 1 then wait = math.max(wait, (1 - tokens) / rate) end
+redis.call('HSET', key, 'tokens', tostring(tokens), 'at', tostring(now))
+if wait > 0 then return {0, math.max(1, math.ceil(wait))} end
+redis.call('HSET', key, 'tokens', tostring(tokens - 1), 'last', tostring(now))
+-- Expire only after the bucket could have completely refilled, not after
+-- one fixed window (which would accidentally create another full burst).
+redis.call('PEXPIRE', key, math.ceil(math.max(cap / rate, spacing) + 60000))
+return {1, 0}
+"#;
+        loop {
+            if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                anyhow::bail!("shared pacing cancelled");
+            }
+            let (allowed, ms): (i64, i64) = redis::Script::new(LUA)
+                .key(self.k(&format!("pace:{host}")))
+                .arg(p.requests_per_sec)
+                .arg(p.burst)
+                .arg(p.min_interval_ms)
+                .invoke_async(&mut self.con)
+                .await?;
+            if allowed < 0 {
+                anyhow::bail!("host refused by shared policy");
+            }
+            if allowed == 1 {
+                return Ok(());
+            }
+            let sleep = tokio::time::sleep(
+                Duration::from_millis(ms.max(1) as u64).min(Duration::from_secs(30)),
+            );
+            tokio::pin!(sleep);
+            loop {
+                if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                    anyhow::bail!("shared pacing cancelled");
+                }
+                tokio::select! { _ = &mut sleep => break, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+            }
+        }
+    }
+    pub(crate) async fn note_crawl_delay(&mut self, host: &str, delay: Duration) -> Result<()> {
+        let key = self.k(&format!("pace:{host}"));
+        if delay > Duration::from_secs(3600) {
+            let _: () = self.con.hset(&key, "abandoned", 1).await?;
+            let _: i64 = self.con.persist(&key).await?;
             return Ok(());
         }
-        let limit = per_sec.ceil().max(1.0) as i64;
-        loop {
-            let sec = now_secs();
-            let key = format!("{}:rl:{}:{}", self.prefix, host, sec);
-            let n: i64 = self.con.incr(&key, 1).await?;
-            if n == 1 {
-                let _: i64 = self.con.expire(&key, 2).await?;
-            }
-            if n <= limit {
-                return Ok(());
-            }
-            if stop.map(|s| s.load(Ordering::SeqCst)).unwrap_or(false) {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(120)).await;
+        let _: i64 = redis::Script::new("local old=tonumber(redis.call('HGET',KEYS[1],'delay') or '0'); if tonumber(ARGV[1])>old then redis.call('HSET',KEYS[1],'delay',ARGV[1]) end; return 1")
+            .key(&key).arg(delay.as_millis() as u64).invoke_async(&mut self.con).await?;
+        let _: i64 = self.con.persist(&key).await?;
+        Ok(())
+    }
+    pub(crate) async fn note_block(
+        &mut self,
+        host: &str,
+        cfg: &Config,
+        after: Option<Duration>,
+    ) -> Result<()> {
+        const LUA: &str = r#"
+local n = redis.call('HINCRBY', KEYS[1], 'blocks', 1)
+local wait = math.max(math.min(3600000, tonumber(ARGV[1]) * 2 ^ math.min(6,n-1)), tonumber(ARGV[2]))
+local tm=redis.call('TIME'); local now=tonumber(tm[1])*1000+tonumber(tm[2])/1000
+redis.call('HSET', KEYS[1], 'blocked', tostring(now+wait))
+if n >= tonumber(ARGV[3]) or wait>3600000 then
+ redis.call('HSET', KEYS[1], 'abandoned', 1); redis.call('PERSIST', KEYS[1])
+else redis.call('PERSIST', KEYS[1]) end
+return 1
+"#;
+        let _: i64 = redis::Script::new(LUA)
+            .key(self.k(&format!("pace:{host}")))
+            .arg(cfg.block_backoff_secs.saturating_mul(1000))
+            .arg(after.map_or(0, |d| d.as_millis().min(i64::MAX as u128) as u64))
+            .arg(cfg.block_breaker_count.max(1))
+            .invoke_async(&mut self.con)
+            .await?;
+        Ok(())
+    }
+    pub(crate) async fn note_success(&mut self, host: &str) -> Result<()> {
+        let _: () = self
+            .con
+            .hset(self.k(&format!("pace:{host}")), "blocks", 0)
+            .await?;
+        Ok(())
+    }
+    pub(crate) async fn record_limit_reached(&mut self, cap: u64) -> Result<bool> {
+        if cap == 0 {
+            return Ok(false);
         }
+        let used: Option<u64> = self.con.get(self.k("records_budget")).await?;
+        Ok(used.unwrap_or(0) >= cap)
+    }
+    pub(crate) async fn reserve_record(&mut self, cap: u64) -> Result<bool> {
+        if cap == 0 {
+            return Ok(true);
+        }
+        let yes: i64 = redis::Script::new("local n=tonumber(redis.call('GET',KEYS[1]) or '0'); if n>=tonumber(ARGV[1]) then return 0 end; redis.call('INCR',KEYS[1]); return 1")
+            .key(self.k("records_budget")).arg(cap).invoke_async(&mut self.con).await?;
+        Ok(yes == 1)
+    }
+    pub(crate) async fn reserve_page(
+        &mut self,
+        target: &str,
+        global: usize,
+        local: usize,
+    ) -> Result<bool> {
+        const LUA: &str = r#"
+local g=tonumber(redis.call('GET',KEYS[1]) or '0'); local t=tonumber(redis.call('GET',KEYS[2]) or '0')
+if g>=tonumber(ARGV[1]) or t>=tonumber(ARGV[2]) then return 0 end
+redis.call('INCR',KEYS[1]);redis.call('INCR',KEYS[2]);return 1
+"#;
+        let yes: i64 = redis::Script::new(LUA)
+            .key(self.k("budget"))
+            .key(self.k(&format!("tgt:{target}")))
+            .arg(global)
+            .arg(local)
+            .invoke_async(&mut self.con)
+            .await?;
+        Ok(yes == 1)
     }
 
     /// Cached robots.txt for an origin. Ok(None) = "not cached yet";
@@ -357,6 +530,19 @@ impl Queue {
                 .await?;
         }
         Ok(())
+    }
+}
+
+struct LeaseHeartbeat(tokio::task::JoinHandle<()>);
+impl LeaseHeartbeat {
+    async fn finish(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -444,17 +630,28 @@ pub async fn worker(cfg: Config, opts: WorkerOpts) -> Result<WorkerStats> {
     // Same per-egress budget as single-node crawls: a shard must not use the
     // queue as a license to hammer one proxy (0 = unlimited).
     pool.set_inflight_cap(cfg.max_inflight_per_proxy);
-    let fetcher = Arc::new(Fetcher::new(cfg.clone(), pool.clone()));
+    let shared = Queue::connect(&opts.redis_url, &opts.prefix).await?;
+    let fetcher = Arc::new(
+        Fetcher::new(cfg.clone(), pool.clone())
+            .with_cancellation(opts.stop.iter().cloned().collect(), None)
+            .with_shared_pacing(shared),
+    );
     // Per-process engine runtime: the same breaker + event bus the single
     // node uses, scoped to this worker. There is no events *file* here
     // (many shards writing one path would interleave corrupt JSONL); the
     // ring powers debug output and keeps worker code on the shared path.
     let runtime = Runtime::new(&cfg, metrics.clone());
-    let (sink, sink_path) = sink::build(&cfg.output)?;
-    let extractors: Vec<Extractor> = cfg
+    let (sink, sink_path) = sink::build_for_targets(&cfg.output, &cfg.targets)?;
+    let extractors: Vec<ExtractMode> = cfg
         .targets
         .iter()
-        .map(|t| Extractor::compile(&t.extract))
+        .map(|t| {
+            if t.mode == "json" {
+                Ok(ExtractMode::Json(JsonExtractor::compile(&t.extract)?))
+            } else {
+                Ok(ExtractMode::Html(Extractor::compile(&t.extract)?))
+            }
+        })
         .collect::<Result<_>>()?;
     // Same transform/schema pipeline as the single-node engine: a sharded
     // crawl must not write records its own `harvest validate` would flag.
@@ -521,7 +718,7 @@ pub async fn worker(cfg: Config, opts: WorkerOpts) -> Result<WorkerStats> {
         let lease = LeaseId::new(&worker_id, lease_seq, salt);
         let _ = q.touch_lease(&raw, &lease).await;
         let hb_stop = Arc::new(AtomicBool::new(false));
-        {
+        let heartbeat = LeaseHeartbeat({
             let mut qhb = q.clone();
             let raw_hb = raw.clone();
             let lease_hb = lease.clone();
@@ -536,25 +733,30 @@ pub async fn worker(cfg: Config, opts: WorkerOpts) -> Result<WorkerStats> {
                     }
                     let _ = qhb.touch_lease(&raw_hb, &lease_hb).await;
                 }
-            });
-        }
-        if let Some(exp) = job.expires_at {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if now > exp {
-                runtime.emit(
-                    EventKind::JobExpired,
-                    None,
-                    serde_json::json!({"url": job.url, "target": job.target}),
-                );
-                q.dead(&job, "expired-in-queue").await?;
-                st.dead += 1;
-                continue;
+            })
+        });
+        let mut ack_current = true;
+        let expired = job.expires_at.is_some_and(|exp| unix_now() > exp);
+        if is_prequarantined_corrupt_payload(&job) {
+            // `pop_job` already moved an undecodable JSON payload to the DLQ
+            // and removed it from inflight; do not write a second DLQ entry.
+            st.dead += 1;
+        } else if expired {
+            runtime.emit(
+                EventKind::JobExpired,
+                None,
+                serde_json::json!({"url": crate::config::redact_credentials(&job.url), "target": job.target}),
+            );
+            let target_id = cfg.targets.get(job.target).map(|target| target.id.as_str());
+            match q.dead_for_target(&job, target_id, "expired-in-queue").await {
+                Ok(()) => st.dead += 1,
+                Err(e) => {
+                    st.queue_errors += 1;
+                    ack_current = false;
+                    tracing::error!(%e, "expired job could not be written to the DLQ; leaving it inflight for recovery");
+                }
             }
-        }
-        if let Err(e) = handle_job(
+        } else if let Err(e) = handle_job(
             &cfg,
             &fetcher,
             &metrics,
@@ -563,30 +765,62 @@ pub async fn worker(cfg: Config, opts: WorkerOpts) -> Result<WorkerStats> {
             &pipelines,
             &mut q,
             &job,
-            opts.stop.as_ref(),
             queue_budget,
+            opts.stop.as_ref(),
             &runtime,
             &mut st,
         )
         .await
         {
-            tracing::warn!(url = %job.url, %e, "job error -> dead-letter");
-            if let Err(e) = q.dead(&job, &format!("worker:{e}")).await {
-                st.queue_errors += 1;
-                tracing::error!(%e, "dlq write failed (job lost from queue anyway)");
+            let safe_error = crate::config::redact_observation_text(&e.to_string());
+            tracing::warn!(url = %crate::config::redact_credentials(job.url.as_str()), error = %safe_error, "job error -> dead-letter");
+            let target_id = cfg.targets.get(job.target).map(|target| target.id.as_str());
+            match q
+                .dead_for_target(&job, target_id, &format!("worker:{safe_error}"))
+                .await
+            {
+                Ok(()) => st.dead += 1,
+                Err(dead_err) => {
+                    st.queue_errors += 1;
+                    ack_current = false;
+                    tracing::error!(%dead_err, "DLQ write failed; leaving the job inflight for recovery");
+                }
             }
-            st.dead += 1;
         }
         hb_stop.store(true, Ordering::Relaxed);
+        heartbeat.finish().await;
+        // If DLQ persistence failed, release the lease but do not ack: the
+        // explicit inflight sweep can safely return the original job later.
         q.drop_lease(&raw).await;
-        if let Err(e) = q.ack(&raw).await {
-            st.queue_errors += 1;
-            tracing::warn!(%e, "ack failed; inflight stray will be swept by lease expiry");
+        if ack_current {
+            if let Err(e) = q.ack(&raw).await {
+                st.queue_errors += 1;
+                tracing::warn!(%e, "ack failed; inflight stray will be swept after the lease expires");
+            }
         }
     }
-    sink.flush()?;
+    sink::finish_owned(&sink).await?;
     tracing::info!(?st, "worker finished");
     Ok(st)
+}
+
+fn queued_job_url(raw: &str) -> Result<Url> {
+    if raw.trim().is_empty() {
+        anyhow::bail!("job URL is empty");
+    }
+    Url::parse(raw).map_err(|_| anyhow::anyhow!("job URL is not a valid absolute URL"))
+}
+
+fn configured_target(
+    targets: &[crate::config::TargetCfg],
+    index: usize,
+) -> Result<&crate::config::TargetCfg> {
+    targets.get(index).ok_or_else(|| {
+        anyhow::anyhow!(
+            "job target index {index} is out of range for {} configured targets",
+            targets.len()
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -595,37 +829,45 @@ async fn handle_job(
     fetcher: &Arc<Fetcher>,
     metrics: &Arc<Metrics>,
     sink: &Arc<dyn sink::Sink>,
-    extractors: &[Extractor],
+    extractors: &[ExtractMode],
     pipelines: &[crate::transform::TargetPipeline],
     q: &mut Queue,
     job: &Job,
-    stop: Option<&Arc<AtomicBool>>,
     retry_budget: u32,
+    stop: Option<&Arc<AtomicBool>>,
     runtime: &Arc<Runtime>,
     st: &mut WorkerStats,
 ) -> Result<()> {
-    if job.url.is_empty() {
-        st.dead += 1; // corrupt payload, already quarantined by pop_job
+    let url = queued_job_url(&job.url)?;
+    let tcfg = configured_target(&cfg.targets, job.target)?;
+    if !crate::config::approved_url(tcfg, &url, job.depth) {
+        q.dead_for_target(
+            job,
+            Some(&tcfg.id),
+            "scope: URL outside the approved target",
+        )
+        .await?;
+        st.dead += 1;
         return Ok(());
     }
-    let url = match Url::parse(&job.url) {
-        Ok(u) => u,
-        Err(_) => return Ok(()),
-    };
-    let Some(tcfg) = cfg.targets.get(job.target) else {
-        return Ok(());
-    };
     let host = url.host_str().unwrap_or_default().to_string();
 
+    if q.record_limit_reached(cfg.max_records_per_run).await? {
+        return Ok(());
+    }
     if cfg.respect_robots && !robots_allows(cfg, fetcher, metrics, q, &url).await? {
         metrics.robot_denied();
         st.robots_denied += 1;
         return Ok(());
     }
 
-    // Shared pacing for this host across all shards.
-    let pol = cfg.policy_for(&host);
-    q.wait_host(&host, pol.requests_per_sec, stop).await?;
+    // Admission is atomic BEFORE network I/O, never a post-fetch soft cap.
+    if !q
+        .reserve_page(&tcfg.id, cfg.max_pages, tcfg.max_pages)
+        .await?
+    {
+        return Ok(());
+    }
 
     runtime.emit(
         EventKind::JobStarted,
@@ -649,7 +891,8 @@ async fn handle_job(
             } else {
                 // No deadline => requeueing could hot-spin the queue while
                 // the circuit stays open; retire it visibly instead.
-                q.dead(job, "breaker:open").await?;
+                q.dead_for_target(job, Some(&tcfg.id), "breaker:open")
+                    .await?;
                 st.dead += 1;
             }
             return Ok(());
@@ -691,9 +934,14 @@ async fn handle_job(
                 }
             }
             match e {
-                FetchError::Blocked { status, .. } if matches!(status, 401 | 403 | 451) => {
+                FetchError::Blocked {
+                    status,
+                    retry_after,
+                } if matches!(status, 401 | 403 | 451) => {
+                    q.note_block(&host, cfg, retry_after).await?;
                     metrics.request_blocked();
-                    q.dead(job, &format!("refused:{status}")).await?;
+                    q.dead_for_target(job, Some(&tcfg.id), &format!("refused:{status}"))
+                        .await?;
                     st.blocked += 1;
                     st.dead += 1;
                     return Ok(());
@@ -702,15 +950,14 @@ async fn handle_job(
                     status,
                     retry_after,
                 } => {
+                    q.note_block(&host, cfg, retry_after).await?;
                     metrics.request_blocked();
-                    if let Some(d) = retry_after {
-                        tokio::time::sleep(d.min(Duration::from_secs(30))).await;
-                    }
                     if job.attempts < retry_budget {
                         q.requeue(job.clone()).await?;
                         st.requeued += 1;
                     } else {
-                        q.dead(job, &format!("blocked:{status}")).await?;
+                        q.dead_for_target(job, Some(&tcfg.id), &format!("blocked:{status}"))
+                            .await?;
                         st.blocked += 1;
                         st.dead += 1;
                     }
@@ -721,31 +968,53 @@ async fn handle_job(
                         q.requeue(job.clone()).await?;
                         st.requeued += 1;
                     } else {
-                        q.dead(job, &format!("failed:{msg}")).await?;
+                        q.dead_for_target(job, Some(&tcfg.id), &format!("failed:{msg}"))
+                            .await?;
                         st.failed += 1;
                         st.dead += 1;
                     }
                     return Ok(());
                 }
                 FetchError::Permanent(msg) => {
-                    // A local safety limit (body cap, bad proxy config) will not
+                    if msg == "request cancelled"
+                        && stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
+                    {
+                        // Preserve the in-flight request on graceful shutdown;
+                        // this is not a permanent fetch failure and must not
+                        // consume a retry attempt or enter the DLQ.
+                        q.push_job(job).await?;
+                        st.requeued += 1;
+                        return Ok(());
+                    }
+                    // A local safety limit (body cap, bad proxy url) will not
                     // change on retry: dead-letter with the reason, do not requeue.
                     st.failed += 1;
-                    q.dead(job, &format!("permanent:{msg}")).await?;
+                    q.dead_for_target(job, Some(&tcfg.id), &format!("permanent:{msg}"))
+                        .await?;
                     return Ok(());
                 }
                 FetchError::RobotsDenied => return Ok(()),
             }
         }
     };
+    q.note_success(&host).await?;
     metrics.page_fetched();
 
     let is_text =
         outcome.content_type.contains("html") || outcome.content_type.starts_with("text/");
-    if !is_text {
+    let is_json = matches!(extractors[job.target], ExtractMode::Json(_))
+        && outcome.content_type.contains("json");
+    if !is_text && !is_json {
         return Ok(());
     }
-    let fp = extract::fingerprint(&outcome.body);
+    if !is_json {
+        extract::guard_html(&outcome.body)?;
+    }
+    let fp = if is_json {
+        extract::fingerprint_json(&outcome.body)?
+    } else {
+        extract::fingerprint(&outcome.body)
+    };
     if !q
         .mark_seen("seen_fp", &format!("{}:{}", tcfg.id, fp))
         .await?
@@ -756,8 +1025,27 @@ async fn handle_job(
     }
 
     let (fields, hrefs, quarantined) = {
-        let doc = Html::parse_document(&outcome.body);
-        let mut fields = extractors[job.target].extract(&doc);
+        let (mut fields, hrefs) = match &extractors[job.target] {
+            ExtractMode::Json(ex) => (
+                ex.extract_bounded(&serde_json::from_str(&outcome.body)?)?,
+                Vec::new(),
+            ),
+            ExtractMode::Html(ex) => {
+                let doc = Html::parse_document(&outcome.body);
+                let fields = ex.extract_bounded(&doc)?;
+                let selector = tcfg
+                    .link_selector
+                    .as_deref()
+                    .and_then(|s| Selector::parse(s).ok())
+                    .unwrap_or_else(|| Selector::parse("a[href]").expect("validated at startup"));
+                let hrefs = if tcfg.follow_links && job.depth < tcfg.max_depth {
+                    extract::links_bounded(&doc, &selector, cfg.max_pages.min(tcfg.max_pages))
+                } else {
+                    Vec::new()
+                };
+                (fields, hrefs)
+            }
+        };
         let po = pipelines[job.target].apply(&mut fields, url.as_str(), job.depth)?;
         for _ in 0..po.drift {
             metrics.schema_drift();
@@ -768,28 +1056,18 @@ async fn handle_job(
         if let Some(reasons) = &po.quarantined {
             metrics.record_quarantined();
             tracing::warn!(
-                url = %url,
+                url = %crate::config::redact_credentials(url.as_str()),
                 target = %tcfg.id,
                 "record quarantined by schema enforcement: {}",
                 reasons.join("; ")
             );
         }
-        let hrefs = if tcfg.follow_links && job.depth < tcfg.max_depth {
-            let sel: Selector = tcfg
-                .link_selector
-                .as_deref()
-                .and_then(|s| Selector::parse(s).ok())
-                .unwrap_or_else(|| Selector::parse("a[href]").expect("validated at startup"));
-            extract::links(&doc, &sel)
-        } else {
-            Vec::new()
-        };
         (fields, hrefs, po.quarantined)
     };
     let rec = Record {
         run: cfg.name.clone(),
         target: tcfg.id.clone(),
-        url: url.to_string(),
+        url: crate::config::redact_credentials(outcome.url.as_str()),
         depth: job.depth,
         ts: now_secs(),
         fingerprint: fp,
@@ -802,7 +1080,7 @@ async fn handle_job(
         None,
         serde_json::json!({"url": rec.url, "fields": rec.fields.len()}),
     );
-    if quarantined.is_none() {
+    if quarantined.is_none() && q.reserve_record(cfg.max_records_per_run).await? {
         let t_write = std::time::Instant::now();
         let wr = sink.write(&rec);
         metrics.note_storage_write(t_write.elapsed().as_millis() as u64);
@@ -820,18 +1098,11 @@ async fn handle_job(
     }
     st.fetched += 1;
 
-    // Budgets: global max_pages and per-target max_pages are enforced
-    // through shared Redis counters (approximate under races — fine for a
-    // politeness budget; the per-host limiter is what sites actually feel).
-    let g = q.incr_budget("budget").await?;
-    let t = q.incr_budget(&format!("tgt:{}", tcfg.id)).await?;
-    if g >= cfg.max_pages as i64 || t >= tcfg.max_pages as i64 {
-        return Ok(());
-    }
+    // Fetch-attempt budgets were reserved before requesting the page.
 
     if tcfg.follow_links && job.depth < tcfg.max_depth {
         for href in hrefs {
-            let Ok(abs) = url.join(href.trim()) else {
+            let Ok(abs) = outcome.url.join(href.trim()) else {
                 continue;
             };
             if abs.scheme() != url.scheme()
@@ -902,7 +1173,13 @@ async fn robots_allows(
         Some(t) => Robots::parse(t, &ua_token(&cfg.user_agent)),
         None => Robots::default(),
     };
-    Ok(robots.allows(url.path()))
+    let base = Url::parse(&format!("{}://{}", url.scheme(), url.authority()))?;
+    fetcher.remember_robots(&base, txt.as_deref());
+    if let Some(delay) = robots.required_delay() {
+        q.note_crawl_delay(url.host_str().unwrap_or_default(), delay)
+            .await?;
+    }
+    Ok(robots.allows_url(url))
 }
 
 /// Give each worker process its own jsonl/csv fragment (jsonl shards merge

@@ -1,5 +1,5 @@
 {
-  "_note": "LOCAL/DEMO config: safe to run as-is (binds loopback, no secrets). For production: set admin_token (e.g. \"${HARVEST_ADMIN_TOKEN}\" \u2014 the engine expands whole-value ${VAR} references from the environment), keep or raise max_response_bytes, and read SECURITY.md before rebinding metrics_addr.",
+  "_note": "LOCAL/DEMO config: safe to run as-is (binds loopback, no secrets). For production: set admin_token (e.g. \"${HARVEST_ADMIN_TOKEN}\" — the engine expands whole-value ${VAR} references from the environment), keep or raise max_response_bytes, and read SECURITY.md before rebinding metrics_addr.",
   "name": "client-demo-run",
   "user_agent": "harvest/0.1 (acme-data-bot; contact: data@acme.example)",
   "respect_robots": true,
@@ -38,16 +38,6 @@
   "proxies": [
     {
       "id": "direct"
-    },
-    {
-      "id": "fra-1",
-      "url": "http://user:pass@fra-gw.internal.example:8000",
-      "region": "eu-west"
-    },
-    {
-      "id": "sin-1",
-      "url": "http://user:pass@sin-gw.internal.example:8001",
-      "region": "ap-south"
     }
   ],
   "targets": [

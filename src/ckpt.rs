@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 /// Checkpoint layout version. Bump on incompatible shape changes.
 pub const VERSION: u32 = 1;
+const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingJob {
@@ -81,13 +82,12 @@ impl Checkpoint {
     /// Atomic: write beside-file, then rename. A crash anywhere in here
     /// leaves either the previous checkpoint or the new one — never a mix.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p).with_context(|| format!("mkdir {}", p.display()))?;
-        }
         let body = serde_json::to_vec(self).context("serialize checkpoint")?;
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("rename -> {}", path.display()))?;
+        if body.len() as u64 > MAX_CHECKPOINT_BYTES {
+            bail!("checkpoint exceeds the {MAX_CHECKPOINT_BYTES}-byte limit");
+        }
+        crate::fsutil::write_private_atomic(path, &body)
+            .with_context(|| format!("write checkpoint {}", path.display()))?;
         Ok(())
     }
 
@@ -95,8 +95,9 @@ impl Checkpoint {
     /// is a hard error on purpose: guessing here means quietly re-crawling
     /// (or *not* crawling) pages the operator believes are handled.
     pub fn load_validated(path: &Path, cfg: &crate::Config) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
+        let bytes = crate::fsutil::read_bounded(path, MAX_CHECKPOINT_BYTES)
             .with_context(|| format!("read checkpoint {}", path.display()))?;
+        let raw = String::from_utf8(bytes).context("checkpoint is not UTF-8")?;
         let ck: Checkpoint = serde_json::from_str(&raw).with_context(|| {
             format!(
                 "corrupt checkpoint {} (not valid JSON for v{VERSION})",
