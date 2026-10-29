@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -338,6 +338,26 @@ enum Cmd {
         #[arg(long)]
         key: Option<PathBuf>,
     },
+    /// Manage tenants and api keys for the managed scrape API.
+    #[command(subcommand)]
+    Keys(KeysAction),
+    /// Report metered usage from the append-only hash-chained ledger.
+    Usage {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        /// `YYYY-MM-DD`, inclusive.
+        #[arg(long)]
+        since: Option<String>,
+        /// `YYYY-MM-DD`, inclusive.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,6 +396,81 @@ enum ConfigCmd {
         dry_run: bool,
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands for `harvest keys`.
+///
+/// Keys are the managed API's credentials: the plaintext exists exactly once,
+/// in the output of `create`, and only its SHA-256 hash is ever stored,
+/// logged or printed again.
+#[derive(Subcommand)]
+enum KeysAction {
+    /// Create a tenant. Idempotent by name.
+    Tenant {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    /// Create an api key for a tenant. The plaintext is printed once.
+    Create {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        tenant: String,
+        /// Display name; defaults to the tenant id.
+        #[arg(long)]
+        name: Option<String>,
+        /// Comma-separated scope list (scrape, jobs_read, jobs_write,
+        /// usage_read, keys_admin).
+        #[arg(long = "scope", value_delimiter = ',')]
+        scopes: Vec<String>,
+        #[arg(long, default_value_t = 5.0)]
+        rps: f64,
+        #[arg(long, default_value_t = 10)]
+        burst: u32,
+        #[arg(long, default_value_t = 2)]
+        max_concurrent_jobs: u32,
+        #[arg(long, default_value_t = 100_000)]
+        monthly_quota: u64,
+        #[arg(long, default_value_t = 16 * 1024 * 1024)]
+        max_bytes: u64,
+        #[arg(long = "domain", value_delimiter = ',')]
+        domains: Vec<String>,
+        /// Epoch seconds; omit for a key that never expires.
+        #[arg(long)]
+        expires_at: Option<i64>,
+    },
+    /// List tenants, and keys for one tenant (hashes and metadata only).
+    List {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Rotate a key: revoke the old hash and issue a replacement.
+    Rotate {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        key: String,
+    },
+    /// Revoke a key immediately.
+    Revoke {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        key: String,
+    },
+    /// Suspend a key for an operator-chosen reason.
+    Suspend {
+        #[arg(long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -1544,7 +1639,316 @@ async fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Keys(action) => cmd_keys(action),
+        Cmd::Usage {
+            config,
+            since,
+            until,
+            key,
+            tenant,
+            format,
+        } => cmd_usage(
+            &config,
+            since.as_deref(),
+            until.as_deref(),
+            key.as_deref(),
+            tenant.as_deref(),
+            &format,
+        ),
     }
+}
+
+/// Open the tenancy store described by a config file. A missing store is an
+/// error rather than an empty one: an operator who typos the config should not
+/// silently get a fresh, empty tenant database.
+fn managed_store(config: &Path) -> Result<Arc<harvest::tenancy::TenancyStore>> {
+    let cfg = Config::load(config)?;
+    let managed = cfg.managed_api.clone();
+    if !managed.enabled {
+        anyhow::bail!(
+            "managed_api.enabled is false in {} — set it to true before managing keys",
+            config.display()
+        );
+    }
+    let root = managed
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("state/managed-api"));
+    let store = harvest::tenancy::TenancyStore::open(root.join("tenants"))
+        .map_err(|e| anyhow::anyhow!("cannot open the tenancy store: {e}"))?;
+    Ok(store)
+}
+
+fn cmd_keys(action: KeysAction) -> Result<()> {
+    match action {
+        KeysAction::Tenant { config, name } => {
+            let store = managed_store(&config)?;
+            let tenant = store.new_tenant(&name)?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema": "harvest.tenant.v1",
+                    "tenant": tenant,
+                }))?
+            );
+            Ok(())
+        }
+        KeysAction::Create {
+            config,
+            tenant,
+            name,
+            scopes,
+            rps,
+            burst,
+            max_concurrent_jobs,
+            monthly_quota,
+            max_bytes,
+            domains,
+            expires_at,
+        } => {
+            let store = managed_store(&config)?;
+            let tenant_id =
+                harvest::tenancy::TenantId::parse(&tenant).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // `--tenant-name` is the human-readable name the tenant is
+            // registered under; an unknown tenant is created on demand so a
+            // fresh deployment does not need a separate provisioning step.
+            if store.get_tenant(&tenant_id).is_none() {
+                store.create_tenant(tenant_id, name.as_deref().unwrap_or(&tenant))?;
+            }
+            let scope_set = if scopes.is_empty() {
+                harvest::tenancy::ScopeSet::from(vec![harvest::tenancy::Scope::Scrape])
+            } else {
+                harvest::tenancy::ScopeSet::parse_list(&scopes)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+            };
+            let limits = harvest::tenancy::limits::KeyLimits {
+                rps,
+                burst,
+                max_concurrent_jobs,
+                monthly_quota,
+                max_response_bytes: max_bytes,
+                allowed_domains: domains,
+                scopes: scope_set,
+            };
+            limits.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let generated = store.create_key(&tenant, limits.scopes.clone(), limits, expires_at)?;
+            // The one and only time the plaintext is printed. It is not stored,
+            // not logged and not echoed by any other command.
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema": "harvest.key.created.v1",
+                    "key": generated.key,
+                    "plaintext": generated.plaintext,
+                    "notice": "store this now; it will not be shown again",
+                }))?
+            );
+            Ok(())
+        }
+        KeysAction::List { config, tenant } => {
+            let store = managed_store(&config)?;
+            let out = match tenant {
+                Some(t) => {
+                    let tenant_id = harvest::tenancy::TenantId::parse(&t)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let keys = store
+                        .list_keys(Some(tenant_id.as_str()))
+                        .into_iter()
+                        .map(key_json)
+                        .collect::<Vec<_>>();
+                    json!({ "schema": "harvest.keys.v1", "tenant": t, "keys": keys })
+                }
+                None => {
+                    let (tenants, keys) = store.stats();
+                    let mut items = Vec::new();
+                    for t in store.list_tenants() {
+                        let mut rows = Vec::new();
+                        for k in store.list_keys(Some(t.id.as_str())) {
+                            rows.push(key_json(k));
+                        }
+                        items.push(json!({ "tenant": t, "keys": rows }));
+                    }
+                    json!({
+                        "schema": "harvest.keys.v1",
+                        "tenant_count": tenants,
+                        "key_count": keys,
+                        "items": items,
+                    })
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        KeysAction::Rotate { config, key } => {
+            let store = managed_store(&config)?;
+            let id = resolve_key(&store, &key)?;
+            let generated = store.rotate_key(id.as_str())?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema": "harvest.key.rotated.v1",
+                    "key": generated.key,
+                    "plaintext": generated.plaintext,
+                    "notice": "store this now; the previous plaintext no longer authenticates",
+                }))?
+            );
+            Ok(())
+        }
+        KeysAction::Revoke { config, key } => {
+            let store = managed_store(&config)?;
+            let id = resolve_key(&store, &key)?;
+            let updated = store.revoke_key(id.as_str())?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({ "schema": "harvest.key.v1", "key": updated }))?
+            );
+            Ok(())
+        }
+        KeysAction::Suspend {
+            config,
+            key,
+            reason,
+        } => {
+            let store = managed_store(&config)?;
+            let id = resolve_key(&store, &key)?;
+            let updated = store.suspend_key(id.as_str())?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema": "harvest.key.v1",
+                    "key": updated,
+                    "reason": reason,
+                }))?
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Accept a full key id or the non-secret display prefix.
+fn resolve_key(
+    store: &harvest::tenancy::TenancyStore,
+    presented: &str,
+) -> Result<harvest::tenancy::KeyId> {
+    let key = store
+        .list_keys(None)
+        .into_iter()
+        .find(|k| k.id.as_str() == presented || k.prefix == presented)
+        .ok_or_else(|| anyhow::anyhow!("no key matches `{presented}`"))?;
+    Ok(key.id)
+}
+
+/// A key record for display: the hash is shown (it is not secret) but the
+/// plaintext never is, because it is not stored.
+fn key_json(k: harvest::tenancy::ApiKey) -> serde_json::Value {
+    json!({
+        "id": k.id,
+        "tenant_id": k.tenant_id,
+        "prefix": k.prefix,
+        "key_hash": k.key_hash,
+        "scopes": serde_json::to_value(&k.scopes).unwrap_or_else(|_| json!([])),
+        "status": k.status,
+        "expires_at": k.expires_at,
+        "created_at": k.created_at,
+        "last_used_at": k.last_used_at,
+        "limits": {
+            "rps": k.limits.rps,
+            "burst": k.limits.burst,
+            "max_concurrent_jobs": k.limits.max_concurrent_jobs,
+            "monthly_quota": k.limits.monthly_quota,
+            "max_response_bytes": k.limits.max_response_bytes,
+            "allowed_domains": k.limits.allowed_domains,
+        },
+    })
+}
+
+/// Days since the Unix epoch for a `YYYY-MM-DD` date.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn parse_day(raw: &str) -> Result<u64> {
+    let mut parts = raw.split('-');
+    let y: i64 = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("date must look like YYYY-MM-DD, got `{raw}`"))?;
+    let m: i64 = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("date must look like YYYY-MM-DD, got `{raw}`"))?;
+    let d: i64 = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("date must look like YYYY-MM-DD, got `{raw}`"))?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        anyhow::bail!("date must look like YYYY-MM-DD, got `{raw}`");
+    }
+    Ok((days_from_civil(y, m, d) * 86_400_000) as u64)
+}
+
+fn cmd_usage(
+    config: &Path,
+    since: Option<&str>,
+    until: Option<&str>,
+    key: Option<&str>,
+    tenant: Option<&str>,
+    format: &str,
+) -> Result<()> {
+    let cfg = Config::load(config)?;
+    let managed = cfg.managed_api.clone();
+    if !managed.enabled {
+        anyhow::bail!(
+            "managed_api.enabled is false in {} — set it to true before reading usage",
+            config.display()
+        );
+    }
+    let ledger_dir = managed.ledger_dir();
+    let export_dir = managed.export_dir();
+    let ledger = harvest::usage::ledger::UsageLedger::open(ledger_dir)
+        .context("cannot open the usage ledger")?;
+    let entries = ledger.read_all()?;
+    let filter = harvest::usage::aggregate::UsageFilter {
+        tenant_id: tenant.map(str::to_string),
+        key_id: key.map(str::to_string),
+        since_ms: since.map(parse_day).transpose()?,
+        until_ms: until.map(parse_day).transpose()?,
+        limit: harvest::config::V1_JOBS_MAX_LIST,
+    };
+    let report = harvest::usage::aggregate::summarize(&entries, &filter);
+    match format {
+        "csv" => {
+            let result =
+                harvest::usage::export::export_report_csv(&report, &export_dir, "usage-report")?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema": "harvest.export.v1",
+                    "path": result.path,
+                    "manifest": result.manifest_path,
+                    "rows": result.rows,
+                    "bytes": result.bytes,
+                    "sha256": result.sha256,
+                    "truncated": result.truncated,
+                }))?
+            );
+        }
+        "jsonl" => {
+            for row in &report.by_key {
+                println!("{}", serde_json::to_string(row)?);
+            }
+        }
+        _ => println!(
+            "{}",
+            serde_json::to_string_pretty(&harvest::usage::export::report_json(&report))?
+        ),
+    }
+    Ok(())
 }
 
 /// Ctrl-C and the standard service/container termination signal share the

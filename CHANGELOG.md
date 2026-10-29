@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Managed scrape API (0.10.0 tree)
+- **New library modules** (each with a unit corpus in `src/<name>/tests.rs`,
+  wired through `src/lib.rs`): `tenancy` (tenants, keys stored as SHA-256
+  digests, the closed scope vocabulary, per-key limits and their ceilings,
+  constant-time key comparison), `ratelimit` (per-key token bucket +
+  concurrency cap + monthly quota), `ssrf` (host resolution and refusal of
+  loopback/private/link-local/multicast/unspecified/metadata targets, including
+  IPv6 and IPv4-mapped forms, re-checked on every redirect hop), `usage`
+  (append-only hash-chained ledger, windowed aggregation, JSONL/CSV export) and
+  `scrape_api` (the request model, the service that reuses the engine's own
+  fetcher/extractor, the job registry, idempotency, HMAC webhook delivery with
+  retry + dead-letter, and the OpenAPI generator). No second engine, fetcher,
+  auth system, exporter or queue was added.
+- **Customer surface** (`src/admin.rs` → `src/scrape_api/handlers.rs`), every
+  route API-key-authenticated and fail-closed: `POST /v1/scrape`,
+  `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/:id`,
+  `POST /v1/jobs/:id/cancel`, `GET /v1/usage`, `GET /v1/openapi.json`.
+  Submission answers `202`, cancellation of a terminal job `409`, and every
+  response carries `"schema": 1` plus the ledger head it was metered under.
+  `POST /v1/scrape` honours an `idempotency-key` header or body field and
+  replays the stored response without touching the network.
+- **Operator surface** (`/v1/admin/*`, console bearer, never a tenant key):
+  `POST`/`GET /v1/admin/tenants`, `POST`/`GET /v1/admin/keys`,
+  `POST /v1/admin/keys/:id/{rotate,revoke,suspend}`, `GET /v1/admin/usage`,
+  `POST /v1/admin/usage/export`. A key's plaintext is returned exactly once, at
+  creation or rotation, and never read back.
+- **Metering**: every request that reaches the service — including refusals —
+  is appended to the hash-chained ledger, and `GET /v1/usage` folds it into
+  per-key, per-day and total rows. New Prometheus counters:
+  `harvest_managed_api_requests_total{status}`, `harvest_api_rate_limited_total`,
+  `harvest_api_quota_denied_total`, `harvest_api_usage_units_total`,
+  `harvest_api_jobs_active`, `harvest_webhook_deliveries_total{result}`.
+- **Webhooks**: `POST /v1/scrape` accepts a `webhook_url`; deliveries are
+  HMAC-SHA256 signed (`X-Harvest-Signature` + `X-Harvest-Timestamp`), retried
+  on a bounded ladder, and exhausted deliveries are written to a dead-letter
+  file. Webhooks are off unless an operator enables them and allows the host.
+- **Configuration**: a `managed_api` section in `src/config.rs` (enabled flag,
+  data directory, default `KeyLimits`, pricing table, job-queue bounds, webhook
+  retry bounds) validated at startup, with example blocks added to
+  `config.example.json` and `ops/harvest/config.example.json`. `ledger_dir`
+  and `export_dir` are derived from `data_dir` when unset.
+- **CLI**: `harvest keys create|list|rotate|revoke|suspend` and
+  `harvest usage --since --until --format json|jsonl|csv`.
+- **OpenAPI**: `GET /v1/openapi.json` renders from the same route table the
+  router uses; `docs/openapi.json` is that document checked in byte-for-byte and
+  pinned by `tests/openapi_contract.rs`.
+- **Console** 26 → **29 routes**: **API Keys** (tenant selector, key table with
+  scopes/limits/status, one-time plaintext reveal, rotate/suspend/revoke) and
+  **Usage** (filterable per-key/per-day/total metering from the ledger, with
+  JSONL/CSV export). `web/src/lib/apiRoutes/API_ROUTES.ts` grew to 53 rows.
+- **Tests**: `tests/managed_api.rs` (18, real socket + real origin + real
+  store/ledger/webhook), `tests/tenancy_security.rs` (11), `tests/openapi_contract.rs`
+  (7); `tests/route_contract.rs` pins the new routes; `src/browser/tests.rs`
+  adds the browser subsystem's cross-module corpus; `repo_integrity` now passes
+  5/5. Engine total: **1021 passed / 0 failed** with
+  `cargo test --locked --all-features` (36 binaries); console **394 passed /
+  0 failed** (129 files).
+- **Docs**: `docs/api/26-managed-scrape-api.md`, `docs/modules/` entries for the
+  five new modules, and three new `docs/pages/` guides (API Keys, Usage,
+  Browser Studio).
+- fmt/clippy `-D warnings` clean.
+
 ### Authenticated control plane (0.10.0 tree)
 - **New library modules** (each with inline unit suites, wired into `src/lib.rs`):
   `control` (the typed command model: commands, ids, limits and their ceilings,

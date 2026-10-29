@@ -28,25 +28,32 @@ config (src/config.rs) ─ validate at startup, policy sha
   → ckpt (src/ckpt.rs), audit (src/audit.rs), events (src/events.rs),
     metrics (src/metrics.rs), alerts (src/alerts.rs), ops (src/ops.rs),
     accounting (src/accounting.rs)
-admin plane: src/admin.rs (router: 28 GET + 6 POST) + src/admin/ submodules,
-  helpers in src/api.rs; signing in src/sign.rs; export in src/export.rs.
+admin plane: src/admin.rs (router: 50 routes — 35 GET + 15 POST, of which 16
+  are /v1/*) + src/admin/ submodules, helpers in src/api.rs; signing in
+  src/sign.rs; export in src/export.rs.
+managed API plane: src/tenancy/ (tenants, digest-stored keys, scopes,
+  limits), src/ratelimit.rs (per-key token bucket + concurrency + quota),
+  src/ssrf.rs (target guard), src/usage/ (hash-chained ledger, aggregation,
+  export), src/scrape_api/ (handlers, service, jobs, idempotency, webhooks,
+  pricing, OpenAPI generator) — mounted by src/admin.rs when
+  managed_api.enabled is true.
 CLI: src/main.rs (clap: run, serve, history, validate, schema, push,
   worker, queue, status, health, jobs, runs, workers, proxies, metrics,
   datasets, config, audit, export, verify, attest, inspect, explain,
-  migrate).
+  migrate, keys, usage).
 Support: testutil (devtools feature only), error.rs, lib.rs, version.rs
   (build.rs embeds git describe), migrate.rs, exec.rs (worker loop),
   supervisor.rs (pool), export parts logic.
 ```
 
 Regenerate a module listing: `ls src/*.rs | wc -l`. Cross-module
-integration tests live in `tests/` (30 files: ai_pipeline, artifact_download,
+integration tests live in `tests/` (33 files: ai_pipeline, artifact_download,
 artifact_integrity, budgets, cli, cli_ops, content_integrity, control_plane,
 crawl_discovery, dist, e2e, engine_layer, examples, export_formats,
-export_parts, faults, final_release, ops_api, pg, policy_regression,
-properties, remote_ai, remote_crawl, remote_export, repo_integrity,
-route_contract, runtime_health, search_contract, security,
-workflow_devtools).
+export_parts, faults, final_release, managed_api, openapi_contract, ops_api,
+pg, policy_regression, properties, remote_ai, remote_crawl, remote_export,
+repo_integrity, route_contract, runtime_health, search_contract, security,
+tenancy_security, workflow_devtools).
 
 ## React console (web/src/)
 
@@ -55,7 +62,7 @@ boundaries in review): `app/` → `features/` → `components/` → `hooks/` →
 `lib/`.
 
 ```
-app/        routes (ROUTES.ts: 26 entries, metadata incl. lazy loaders),
+app/        routes (ROUTES.ts: 29 entries, metadata incl. lazy loaders),
             router (hash router), App shell composition, providers
 components/ ui/ (28 component files incl. DataTable, Segmented, Modal, Drawer),
             patterns/ (FilterBar, FormSection, MetricCard…, plus the control
@@ -63,12 +70,14 @@ components/ ui/ (28 component files incl. DataTable, Segmented, Modal, Drawer),
             (TopBar, StatusBar, Sidebar, palette, tour, welcome),
             Charts/ (Sparkline, FunnelStrip…), Icons/ (svg registry)
 features/   one folder per page, plus pages/ (ExportCenter, CrawlStudio,
-            AiAssist, ControlJobs, ControlJobDetail, Artifacts):
+            AiAssist, ControlJobs, ControlJobDetail, Artifacts) and the
+            managed console (managed/keys, managed/usage):
             Overview(+HealthSummary,IntelligenceRow),
             Runs(+RunDrawer,runTimeline), Jobs, QueuePage, Workers, Proxies,
             Activity(events), Pipeline, Quality, Storage, Alerts, Audit,
             Diagnostics, ConfigStudio(+StudioIndex,Control,SENSITIVE),
-            TargetBuilder, Api/ApiExplorer(+lib/apiRoutes manifest)
+            TargetBuilder, Api/ApiExplorer(+lib/apiRoutes manifest),
+            managed/(keys: ApiKeys, KeyReveal, CreateKeyForm; usage: Usage)
 hooks/      usePolled (bounded self-rescheduling interval), useTheme,
             useToasts, usePersistentState, useLocalStorageSafe, …
 lib/        api.ts (typed client, 405-safe, idempotency-key + artifact
@@ -91,7 +100,7 @@ tools/check_links.py  relative-markdown-link checker (`make links`)
 Makefile            fmt/lint/test/build/links/smoke/buyer-e2e/all
 demo/server.py      deterministic mock site for examples/config.basic.json
 examples/*.json     validated by tests/examples.rs (5 configs)
-docs/               api/ (26) · pages/ (27, including the index) · adr/ · this map · buyer docs
+docs/               api/ (27) · pages/ (30, including the index) · adr/ · modules/ · this map · buyer docs
 docker/             compose stack for console+engine demo (static-validated)
 ```
 

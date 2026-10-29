@@ -1,6 +1,6 @@
 //! CAPTCHA-specific provider adapter contract; no provider credentials or
 //! vendor API are built in.
-use super::provider::{ChallengeProvider, ProviderError, ProviderRequest, ProviderResult};
+use super::provider::{ChallengeProvider, ProviderError, ProviderRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub fn submit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::challenge::provider;
+    use crate::challenge::provider::{self, ProviderResult};
     struct Noop;
     impl ChallengeProvider for Noop {
         fn id(&self) -> &str {

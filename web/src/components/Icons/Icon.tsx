@@ -34,6 +34,7 @@ import { IMenu } from "./svg/Menu";
 import { IDownload } from "./svg/Download";
 import { IPlug } from "./svg/Plug";
 import { IApi } from "./svg/Api";
+import { IUsage } from "./svg/Usage";
 
 export const Icon = {
   Overview: IOverview,
@@ -69,4 +70,5 @@ export const Icon = {
   Download: IDownload,
   Plug: IPlug,
   Api: IApi,
+  Usage: IUsage,
 };

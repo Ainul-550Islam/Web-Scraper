@@ -44,11 +44,35 @@ impl BrowserContext {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::browser::config::BrowserConfig;
+    use crate::browser::session::BrowserSession;
+
+    /// A session that is never driven: the context key is validated before the
+    /// session is touched, so the key rules can be tested without a live
+    /// WebDriver endpoint.
+    fn idle_session() -> Arc<BrowserSession> {
+        Arc::new(
+            BrowserSession::new(
+                "ctx-test".to_string(),
+                "http://127.0.0.1:1".to_string(),
+                "rt-test".to_string(),
+                reqwest::Client::new(),
+                &BrowserConfig::default(),
+            )
+            .expect("a test session"),
+        )
+    }
+
     #[test]
     fn context_keys_do_not_accept_controls() {
-        assert!(super::BrowserContext::new("a\nb", panic_session()).is_err());
-    }
-    fn panic_session() -> std::sync::Arc<super::BrowserSession> {
-        panic!("key validation precedes session use")
+        let session = idle_session();
+        // Control characters and an empty key are refused; a valid key is
+        // accepted and carries the session through unchanged.
+        assert!(super::BrowserContext::new("a\nb", session.clone()).is_err());
+        assert!(super::BrowserContext::new("", session.clone()).is_err());
+        assert!(super::BrowserContext::new("x", session.clone()).is_ok());
+        // Overlong keys are refused too.
+        assert!(super::BrowserContext::new("x".repeat(200), session).is_err());
     }
 }

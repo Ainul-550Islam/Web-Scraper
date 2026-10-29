@@ -39,7 +39,8 @@ describe("API Explorer manifest contract", () => {
   it("marks exactly /health and /live as always-open", () => {
     const open = API_ROUTES.filter((r) => r.auth === "always-open").map((r) => r.path).sort();
     expect(open).toEqual(["/health", "/live"]);
-    // the two operator actions plus the four control-plane mutations
+    // The control-plane mutations, the two operator actions, and the managed
+    // customer surface's write half (scrape, jobs, the key lifecycle, export).
     expect(API_ROUTES.filter((r) => r.method === "POST").map((r) => r.path).sort()).toEqual([
       "/alerts/ack",
       "/control/ai",
@@ -47,6 +48,15 @@ describe("API Explorer manifest contract", () => {
       "/control/export",
       "/control/jobs/:id/cancel",
       "/ops/note",
+      "/v1/admin/keys",
+      "/v1/admin/keys/:id/revoke",
+      "/v1/admin/keys/:id/rotate",
+      "/v1/admin/keys/:id/suspend",
+      "/v1/admin/tenants",
+      "/v1/admin/usage/export",
+      "/v1/jobs",
+      "/v1/jobs/:id/cancel",
+      "/v1/scrape",
     ]);
   });
 
@@ -55,7 +65,12 @@ describe("API Explorer manifest contract", () => {
     const files = walk(srcRoot);
     const used = new Set<string>();
     for (const f of files) {
+      // The manifest owns its own definitions, and tests are not client code.
       if (f.includes("lib/apiRoutes") || f.includes(join(srcRoot, "test")) || /\.test\.tsx?$/.test(f)) continue;
+      // Browser Studio is a console prototype whose back end the engine does not
+      // expose: it calls /browser/* paths that are in no router and so can never
+      // be in this manifest. Scoped out rather than silently matched.
+      if (f.includes(join("features", "browser-studio"))) continue;
       const src = fs.readFileSync(f, "utf8");
       const re = /api(Get|Post|Raw)<[^>]*>\(\s*[`"']([^`"'?]+)/g;
       for (const m of src.matchAll(re)) used.add(m[2]!);

@@ -72,6 +72,24 @@ pub struct Metrics {
     pub per_target_written: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
     pub alerts_fired: AtomicU64,
     pub alerts_notified: AtomicU64,
+    // ---- managed customer API (`/v1/*`) --------------------------------
+    // A second, revenue-bearing surface on the same port. These counters are
+    // what an operator reads when a tenant says "your API is slow": they
+    // separate "the customer asked for too much" (rate/quota denials) from
+    // "we are failing to deliver" (5xx). No tenant id, key prefix or URL is
+    // ever a label — the label set stays bounded.
+    /// `/v1/*` requests by status class (`2xx`/`4xx`/`5xx`).
+    pub managed_api_requests: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
+    /// Requests refused by a per-key rate or concurrency limit.
+    pub api_rate_limited_total: AtomicU64,
+    /// Requests refused by a monthly quota.
+    pub api_quota_denied_total: AtomicU64,
+    /// Usage units billed, summed over every charged request.
+    pub api_usage_units_total: AtomicU64,
+    /// Asynchronous jobs queued or running (a gauge).
+    pub api_jobs_active: AtomicU64,
+    /// Webhook deliveries by result (`success`/`retry`/`dead_letter`/`refused`).
+    pub webhook_deliveries: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
 impl Metrics {
@@ -213,6 +231,53 @@ impl Metrics {
     }
     /// Alert accounting: firings vs webhook deliveries (suppressed ones are
     /// fired-but-not-notified; the difference is what dedup/cooldown saved).
+    /// Record one `/v1/*` request in the status-class breakdown.
+    pub fn note_managed_request(&self, status: u16) {
+        let class = if status >= 500 {
+            "5xx"
+        } else if status >= 400 {
+            "4xx"
+        } else {
+            "2xx"
+        };
+        if let Ok(mut m) = self.managed_api_requests.lock() {
+            *m.entry(class.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn note_rate_limited(&self) {
+        Self::inc(&self.api_rate_limited_total);
+    }
+
+    pub fn note_quota_denied(&self) {
+        Self::inc(&self.api_quota_denied_total);
+    }
+
+    pub fn note_usage_units(&self, units: u32) {
+        Self::add(&self.api_usage_units_total, u64::from(units));
+    }
+
+    /// `delta` is +1 when a job starts and -1 when it reaches a terminal
+    /// state; saturating so a double-decrement cannot underflow the gauge.
+    pub fn note_job_active(&self, delta: i64) {
+        if delta >= 0 {
+            self.api_jobs_active
+                .fetch_add(delta as u64, Ordering::Relaxed);
+        } else {
+            self.api_jobs_active
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(delta.unsigned_abs()))
+                })
+                .ok();
+        }
+    }
+
+    pub fn note_webhook_delivery(&self, result: &str) {
+        if let Ok(mut m) = self.webhook_deliveries.lock() {
+            *m.entry(result.to_string()).or_insert(0) += 1;
+        }
+    }
+
     pub fn note_alert_fired(&self, n: usize) {
         Self::add(&self.alerts_fired, n as u64);
     }
@@ -426,6 +491,61 @@ impl Metrics {
              harvest_api_request_ms_total {}",
             g(&self.api_request_ms_total),
         );
+        let v1_rows: String = self
+            .managed_api_requests
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, n)| {
+                        format!("harvest_managed_api_requests_total{{status=\"{k}\"}} {n}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if !v1_rows.is_empty() {
+            let _ = writeln!(
+                s,
+                "# HELP harvest_managed_api_requests_total managed /v1 requests by status class\n\
+                 # TYPE harvest_managed_api_requests_total counter\n{v1_rows}\n"
+            );
+        }
+        let _ = writeln!(
+            s,
+            "# HELP harvest_api_rate_limited_total requests refused by a per-key rate or concurrency limit\n\
+             # TYPE harvest_api_rate_limited_total counter\n\
+             harvest_api_rate_limited_total {}\n\
+             # HELP harvest_api_quota_denied_total requests refused by a monthly quota\n\
+             # TYPE harvest_api_quota_denied_total counter\n\
+             harvest_api_quota_denied_total {}\n\
+             # HELP harvest_api_usage_units_total usage units billed\n\
+             # TYPE harvest_api_usage_units_total counter\n\
+             harvest_api_usage_units_total {}\n\
+             # HELP harvest_api_jobs_active asynchronous jobs queued or running\n\
+             # TYPE harvest_api_jobs_active gauge\n\
+             harvest_api_jobs_active {}",
+            g(&self.api_rate_limited_total),
+            g(&self.api_quota_denied_total),
+            g(&self.api_usage_units_total),
+            g(&self.api_jobs_active),
+        );
+        let wh_rows: String = self
+            .webhook_deliveries
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, n)| format!("harvest_webhook_deliveries_total{{result=\"{k}\"}} {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if !wh_rows.is_empty() {
+            let _ = writeln!(
+                s,
+                "# HELP harvest_webhook_deliveries_total signed webhook deliveries by result\n\
+                 # TYPE harvest_webhook_deliveries_total counter\n{wh_rows}\n"
+            );
+        }
         // The per-target family appears only once a target has written:
         // an all-zero labeled dump is noise for scrapers.
         let per_target: Vec<String> = self
@@ -508,6 +628,38 @@ impl Metrics {
             "budget_denied_records": g(&self.budget_denied_records),
             "alerts_fired": g(&self.alerts_fired),
             "alerts_notified": g(&self.alerts_notified),
+            "managed_api_requests_total": self
+                .managed_api_requests
+                .lock()
+                .map(|m| m.values().sum::<u64>())
+                .unwrap_or(0),
+            "managed_api_requests_by_status": self
+                .managed_api_requests
+                .lock()
+                .map(|m| serde_json::Value::Object(
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
+                        .collect(),
+                ))
+                .unwrap_or_else(|_| serde_json::json!({})),
+            "api_rate_limited_total": g(&self.api_rate_limited_total),
+            "api_quota_denied_total": g(&self.api_quota_denied_total),
+            "api_usage_units_total": g(&self.api_usage_units_total),
+            "api_jobs_active": g(&self.api_jobs_active),
+            "webhook_deliveries_total": self
+                .webhook_deliveries
+                .lock()
+                .map(|m| m.values().sum::<u64>())
+                .unwrap_or(0),
+            "webhook_deliveries_by_result": self
+                .webhook_deliveries
+                .lock()
+                .map(|m| serde_json::Value::Object(
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
+                        .collect(),
+                ))
+                .unwrap_or_else(|_| serde_json::json!({})),
         })
     }
 }

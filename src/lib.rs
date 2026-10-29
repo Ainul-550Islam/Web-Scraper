@@ -90,6 +90,7 @@ pub mod pgsink;
 pub mod policy;
 pub mod policy_engine;
 pub mod proxy;
+pub mod ratelimit;
 pub mod repository;
 pub mod retry;
 pub mod reval;
@@ -99,18 +100,22 @@ pub mod runtime;
 pub mod runtime_metrics;
 pub mod sched;
 pub mod schema;
+pub mod scrape_api;
 pub mod search;
 pub mod sign;
 pub mod sink;
 mod sink_lifecycle;
 pub mod sitemap;
 mod source_io;
+pub mod ssrf;
 pub mod stream;
 pub mod supervisor;
+pub mod tenancy;
 /// Dev-only test harness (unit tests + `devtools` feature; never in normal builds).
 #[cfg(any(test, feature = "devtools"))]
 pub mod testutil;
 pub mod transform;
+pub mod usage;
 mod work_cancel;
 
 pub use config::Config;

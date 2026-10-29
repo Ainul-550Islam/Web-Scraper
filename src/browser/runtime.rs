@@ -307,10 +307,8 @@ impl BrowserRuntime {
             }
         }
         if let Some(mut child) = self.inner.child.lock().await.take() {
-            if child.try_wait().ok().flatten().is_none() {
-                if child.kill().await.is_err() {
-                    failed = true;
-                }
+            if child.try_wait().ok().flatten().is_none() && child.kill().await.is_err() {
+                failed = true;
             }
             let _ = child.wait().await;
         }
@@ -379,10 +377,10 @@ fn validate_key(key: &str) -> BrowserResult<()> {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        if let Ok(child) = self.child.get_mut() {
-            if let Some(child) = child.as_mut() {
-                let _ = child.start_kill();
-            }
+        // `tokio::sync::Mutex::get_mut` hands back `&mut Option<Child>`
+        // directly (it cannot fail: the guard is only held from `&mut self`).
+        if let Some(child) = self.child.get_mut().as_mut() {
+            let _ = child.start_kill();
         }
     }
 }

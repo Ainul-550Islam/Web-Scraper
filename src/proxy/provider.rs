@@ -78,14 +78,26 @@ pub struct ProviderCapabilities {
 
 pub fn redacted_url(input: &str) -> String {
     match url::Url::parse(input) {
-        Ok(mut u) => {
-            if !u.username().is_empty() {
-                let _ = u.set_username("[REDACTED]");
+        Ok(u) => {
+            // Credentials are never re-inserted into a `Url`: the userinfo
+            // grammar rejects the bracketed marker, which would silently leave
+            // the real password in the rendered string. Build the redacted
+            // form by hand instead.
+            let authority = match (u.username(), u.password()) {
+                ("", None) => u.host_str().unwrap_or("").to_string(),
+                _ => {
+                    let host = u.host_str().unwrap_or("").to_string();
+                    let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+                    format!("[REDACTED]:[REDACTED]@{host}{port}")
+                }
+            };
+            let mut out = format!("{}://{authority}", u.scheme());
+            out.push_str(u.path());
+            if let Some(query) = u.query() {
+                out.push('?');
+                out.push_str(query);
             }
-            if u.password().is_some() {
-                let _ = u.set_password(Some("[REDACTED]"));
-            }
-            u.to_string()
+            out
         }
         Err(_) => "[invalid proxy URL]".into(),
     }
@@ -106,7 +118,11 @@ mod tests {
             supports_region_selection: false,
         };
         let s = format!("{p:?}");
-        assert!(!s.contains("secret"));
+        // The field *names* legitimately contain the word "secret"
+        // (`password_secret_ref`), so the assertion is about the credential
+        // itself, not the substring.
+        assert!(!s.contains(":secret@"), "the password is redacted: {s}");
+        assert!(!s.contains("alice:secret"), "the pair is redacted: {s}");
         assert!(s.contains("REDACTED"));
     }
 }

@@ -47,6 +47,10 @@ export const ROUTES: RouteDef[] = [
     title: "Configuration Studio", desc: "The real config document, redacted — edit a draft, never the server" },
   { path: "/api", label: "API Reference", icon: "Api", group: "Console",
     title: "API Explorer", desc: "Read-only map of the engine admin API — routes, auth, params" },
+  { path: "/api-keys", label: "API Keys", icon: "Api", group: "Console",
+    title: "API Keys", desc: "Tenant keys for the managed scrape API — scopes, limits, one-time reveal" },
+  { path: "/usage", label: "Usage", icon: "Usage", group: "Console",
+    title: "Usage", desc: "Managed API metering from the append-only ledger" },
   { path: "/config-diff", label: "Config Diff", icon: "Config", group: "Console",
     title: "Config Diff", desc: "Read-only canonicalized compare of two pasted config documents" },
 
@@ -55,7 +59,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/crawl", label: "Crawl Studio", icon: "Pipeline", group: "Delivery",
     title: "Crawl Studio", desc: "Compose a bounded crawl plan against the engine's own limits" },
   { path: "/browser-studio", label: "Browser Studio", icon: "Pipeline", group: "Delivery",
-    title: "Browser Studio", desc: "Preview authorized browser pages, build selectors, and test workflows" }
+    title: "Browser Studio", desc: "Preview authorized browser pages, build selectors, and test workflows" },
   { path: "/ai", label: "AI Assist", icon: "Info", group: "Delivery",
     title: "AI Assist", desc: "Optional assisted extraction — off by default, never authoritative" },
   { path: "/control", label: "Control Jobs", icon: "Monitor", group: "Delivery",

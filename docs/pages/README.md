@@ -24,9 +24,12 @@ map, not a spec; the contract tests under
 - [Delivery Verify](delivery.md) — `/delivery` · Data & Guardrails
 - [Configuration Studio](config.md) — `/config` · Console
 - [API Explorer](api.md) — `/api` · Console
+- [API Keys](api-keys.md) — `/api-keys` · Console
+- [Usage](usage.md) — `/usage` · Console
 - [Config Diff](config-diff.md) — `/config-diff` · Console
 - [Export Center](export-center.md) — `/export` · Delivery
 - [Crawl Studio](crawl-studio.md) — `/crawl` · Delivery
+- [Browser Studio](browser-studio.md) — `/browser-studio` · Delivery
 - [AI Assist](ai-assist.md) — `/ai` · Delivery
 - [Control Jobs](control-jobs.md) — `/control` · Delivery
 - [Control Job](control-job.md) — `/control/job` · Delivery

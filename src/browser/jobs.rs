@@ -7,7 +7,6 @@ use crate::browser::repository::BrowserRepository;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 const MAX_QUEUE: usize = 10_000;
 struct QueuedJob {

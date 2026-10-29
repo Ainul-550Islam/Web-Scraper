@@ -1,4 +1,4 @@
-import { Button, EmptyState } from "../../../components/ui";
+import { Button, EmptyState } from "../../components/ui";
 import type { SelectorField } from "./SelectorEditor";
 
 function renderNode(node: SelectorField, depth: number, selected: string | null, onSelect: (id: string) => void) {

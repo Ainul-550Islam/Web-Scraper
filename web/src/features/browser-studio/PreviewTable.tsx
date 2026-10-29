@@ -1,4 +1,4 @@
-import { Button, EmptyState } from "../../../components/ui";
+import { Button, EmptyState } from "../../components/ui";
 
 type Row = Record<string, unknown>;
 function display(value: unknown): string {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiGet, apiPost, commandIdempotencyKey, newCommandIdempotencyNonce } from "../../../lib/api";
-import { Button, Card, EmptyState, ErrorState, Field, PageHeader, StatusChip, TextInput } from "../../../components/ui";
-import { Page } from "../../../components/AppShell";
+import { apiGet, apiPost, commandIdempotencyKey, newCommandIdempotencyNonce } from "../../lib/api";
+import { Button, Card, EmptyState, ErrorState, Field, PageHeader, StatusChip, TextInput } from "../../components/ui";
+import { Page } from "../../components/AppShell";
 import ElementPicker from "./ElementPicker";
 import InteractionBuilder, { type StudioAction } from "./InteractionBuilder";
 import PreviewTable from "./PreviewTable";
@@ -92,7 +92,15 @@ export default function BrowserStudio() {
   const removeNode = (nodes: SelectorField[], id: string): SelectorField[] => nodes.filter((node) => node.id !== id).map((node) => ({ ...node, children: removeNode(node.children, id) }));
   const reorderNode = (nodes: SelectorField[], id: string, direction: -1 | 1): SelectorField[] => {
     const at = nodes.findIndex((node) => node.id === id);
-    if (at >= 0) { const to = Math.max(0, Math.min(nodes.length - 1, at + direction)); const copy = [...nodes]; const [item] = copy.splice(at, 1); copy.splice(to, 0, item); return copy; }
+    if (at >= 0) {
+      const to = Math.max(0, Math.min(nodes.length - 1, at + direction));
+      const copy = [...nodes];
+      // `noUncheckedIndexedAccess` makes the destructure `SelectorField | undefined`;
+      // the element is only spliced back in when it exists.
+      const [item] = copy.splice(at, 1);
+      if (item) copy.splice(to, 0, item);
+      return copy;
+    }
     return nodes.map((node) => ({ ...node, children: reorderNode(node.children, id, direction) }));
   };
   const duplicateNode = (nodes: SelectorField[], id: string): SelectorField[] => {

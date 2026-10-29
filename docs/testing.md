@@ -11,7 +11,7 @@ Live Redis and PostgreSQL cases need their opt-in test environment variables; wi
 | Engine full suite | Cargo | `cargo test --all-targets --all-features` | 728 tests passed with live Redis and PostgreSQL enabled; without the opt-in service variables, their integration cases report skips |
 | Console types | `tsc` | `cd web && npx tsc --noEmit` | strict mode, `noUncheckedIndexedAccess`, zero escapes |
 | Console lint | `eslint` | `cd web && npx eslint .` | 0 errors, 0 warnings (barrel override is scoped, not global) |
-| Console unit/dom | Vitest | `cd web && npm test` | 368 tests across 126 files — pages, UX, API, resilience, UI primitives, endpoints, and hooks |
+| Console unit/dom | Vitest | `cd web && npm test` | 394 tests across 129 files — pages, UX, API, resilience, UI primitives, endpoints, and hooks |
 | Build invariants | `vite build` | `cd web && npm run build` | one chunk per route asserted; demo bytes excluded from prod |
 | End-to-end smoke | node script | `cd web && npm run smoke` | serves real `dist/` against live `harvest serve` :9678, 12 checks |
 | Buyer flow E2E | node script | `cd web && npm run e2e:buyer` | 18 checks: spawns demo mock site + `harvest serve` + vite preview, asserts proxy-routed API honesty, then real CLI export → manifest → verify and graceful SIGINT exit 0 |

@@ -351,6 +351,57 @@ implementation, and no fake progress: a job reports `queued`, `running`,
 Details: [`docs/api/24-control-plane-execution.md`](docs/api/24-control-plane-execution.md)
 and [`docs/api/25-artifact-downloads.md`](docs/api/25-artifact-downloads.md).
 
+### Managed scrape API (tenant-facing, off by default)
+
+An optional second surface on the same port, for customers who call the engine
+over HTTP instead of driving the console. It is **off unless
+`managed_api.enabled` is true**, and every route needs a tenant API key — a
+key is stored as a SHA-256 digest, carries a closed set of scopes and per-key
+limits, and its plaintext is shown exactly once at creation or rotation.
+
+```
+POST /v1/scrape                 # one URL -> text/html/json/markdown/screenshot
+POST /v1/jobs                   # queue a bounded job (202; repeats on a schedule)
+GET  /v1/jobs                   # the tenant's pending jobs
+GET  /v1/jobs/:id               # one job, with its finished scrape
+POST /v1/jobs/:id/cancel        # cancel a live job (terminal jobs: 409)
+GET  /v1/usage                  # metering from the append-only ledger
+GET  /v1/openapi.json           # the published contract (3.1, generated)
+POST /v1/admin/tenants          # operator: create a tenant      (console bearer)
+GET  /v1/admin/tenants          # operator: list tenants
+POST /v1/admin/keys             # operator: issue a key
+GET  /v1/admin/keys             # operator: list a tenant's keys
+POST /v1/admin/keys/:id/rotate|revoke|suspend
+GET  /v1/admin/usage            # operator: the same report, unfiltered
+POST /v1/admin/usage/export     # operator: JSONL or CSV download
+```
+
+A key's limits are enforced, not advisory: a token bucket for `rps`/`burst`, a
+per-key concurrency cap, a monthly quota, a hard response-byte cap and an
+optional domain allowlist. Exceeding any of them is a `429` or `403` with the
+reason, before any work happens. `POST /v1/scrape` honours an
+`idempotency-key`, so a retry returns the stored response instead of being
+charged twice.
+
+Compliance is not a console feature here: robots.txt, per-domain pacing,
+circuit breakers and the SSRF guard apply to every customer request exactly as
+they do to the scheduler's. Every URL is resolved and checked before the fetch,
+and re-checked on every redirect hop; loopback, private, link-local, multicast,
+unspecified and metadata ranges are refused in both IPv4 and IPv6 forms. A
+`webhook_url` on a scrape is delivered HMAC-SHA256 signed, retried on a bounded
+ladder, and exhausted deliveries land in a dead-letter file.
+
+Every request that reaches the service is appended to an append-only,
+hash-chained usage ledger — refusals included, because a tenant who asked and
+was declined still consumed the attempt. `GET /v1/usage` folds that ledger into
+per-key, per-day and total rows; the console's **Usage** page reads the same
+report.
+
+Details: [`docs/api/26-managed-scrape-api.md`](docs/api/26-managed-scrape-api.md),
+[`docs/modules/tenancy.md`](docs/modules/tenancy.md),
+[`docs/modules/ssrf.md`](docs/modules/ssrf.md),
+[`docs/modules/usage.md`](docs/modules/usage.md).
+
 ### Scheduler & run history
 
 `harvest serve` repeats a config on `schedule.every_secs` (`0` = back-to-back)
@@ -704,7 +755,7 @@ HARVEST_TEST_PG=1    cargo test --features "postgres" --test pg  # wants a real 
 
 ```
 harvest/
-├── src/                  51 modules, one concern each (lib layout in docs/architecture.md)
+├── src/                  70 source files, one concern each (lib layout in docs/architecture.md)
 │   ├── main.rs           CLI (clap) — thin plumbing over the library
 │   ├── config.rs         all fields + defaults, ${VAR} injection, validate()
 │   ├── engine.rs         the crawl loop          policy.rs  robots.rs
@@ -715,10 +766,16 @@ harvest/
 │   ├── content.rs        MIME/charset classification, size limits, safe decoding
 │   ├── document.rs media.rs   typed document + resource metadata (no payloads)
 │   ├── ai.rs ai/         optional assistance: budgeted, redacted, fail-closed
+│   ├── tenancy/          tenants, digest-stored keys, scopes, per-key limits
+│   ├── ratelimit.rs      per-key token bucket + concurrency cap + monthly quota
+│   ├── ssrf.rs           loopback/private/metadata refusal, every redirect hop
+│   ├── usage/            hash-chained ledger, windowed aggregation, export
+│   ├── scrape_api/       the /v1/* handlers, jobs, idempotency, webhooks, OpenAPI
 │   ├── export/           xlsx.rs · pdf.rs · parquet.rs · xml.rs · bundle.rs (ZIP)
 │   └── dist.rs           redis queue (feature-gated)
-├── tests/                e2e.rs · security.rs · dist.rs · pg.rs · crawl_discovery.rs ·
-│                         ai_pipeline.rs · export_formats.rs · content_integrity.rs
+├── tests/                33 files: e2e.rs · security.rs · dist.rs · pg.rs · crawl_discovery.rs ·
+│                         ai_pipeline.rs · export_formats.rs · content_integrity.rs ·
+│                         managed_api.rs · tenancy_security.rs · openapi_contract.rs
 ├── examples/             basic / production / distributed configs + api-requests.sh
 │   └── output/           real smoke-run artifacts (records, signed audit, signed manifest)
 ├── demo/                 self-contained mock site (server.py) for offline demos
@@ -746,7 +803,8 @@ harvest/
   the recorded policy identity.
 * **Hand-rolled admin server** (no framework): 8 KiB header cap, 2 KiB query
   cap, bounded per-route POST bodies (4 KiB operator actions / 64 KiB control
-  commands), method+path routing over 34 routes (28 GET + 6 POST), timing-safe
+  commands), method+path routing over 50 routes (35 GET + 15 POST, of which 16
+  are the `/v1/*` customer + operator surface), timing-safe
   bearer comparison, constant 401 bodies, and `nosniff`/`no-store` headers.
 * **Deterministic exports**: same inputs ⇒ byte-identical CSV/JSONL
   (only `generated_ts` moves); manifest hashes every file; HMAC receipts are
@@ -807,7 +865,7 @@ engine behavior or the compose file as shipped:
 Version **0.10.0** (see CHANGELOG). Licensed MIT (see [LICENSE](LICENSE)) —
 the `license` field in `Cargo.toml`; adjust terms before commercial
 distribution. Verified here: **728 Rust tests** in the all-target/all-feature
-run with live Redis and PostgreSQL; **368 console tests across 126 files**;
+run with live Redis and PostgreSQL; **394 console tests across 129 files**;
 ESLint, TypeScript, production build, and npm audit pass; buyer-flow E2E is
 **18/18**. All four backend feature configurations compile-check; clippy
 `-D warnings` and rustfmt pass; 302 repository links checked with 0 broken.
@@ -821,10 +879,11 @@ documented here or in `docs/` is not a promise the engine makes.
 ## Web console
 
 `web/` ships a premium React + TypeScript operations console for the admin
-API — 26 pages (overview, runs, jobs, queue, workers, command center, run
+API — 29 pages (overview, runs, jobs, queue, workers, command center, run
 detail, proxies, activity, pipeline, quality, events, storage, alerts, audit,
-diagnostics, delivery verify, config studio, config diff, API explorer, export
-center, crawl studio, AI assist, control jobs, control job, artifacts), all
+diagnostics, delivery verify, config studio, config diff, API explorer, API
+keys, usage, export center, crawl studio, browser studio, AI assist, control
+jobs, control job, artifacts), all
 bound to routes the engine serves or to explicitly local-only tooling (the
 two config tools and the browser-side digest check touch no invented backend). First run shows a
 welcome panel built from live state and an optional (skippable, never
@@ -854,7 +913,7 @@ From `npm run build` on this tree (Vite production output; `dist/` = index.html 
 | initial-load JS+CSS total | 228,173 | 70,059 |
 | whole `dist/` (all lazy route chunks) | 423,362 | — |
 
-Every route is its own lazy chunk (26 pages + shared DataTable/MetricCard
+Every route is its own lazy chunk (29 pages + shared DataTable/MetricCard
 chunks); first paint pulls only the three initial assets above. Perf work is
 deliberately un-done beyond this: the budget here is honesty — if a future
 change moves these numbers, the table above is stale and must be updated by

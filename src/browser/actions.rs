@@ -5,6 +5,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[cfg(test)]
 const ACTION_TIMEOUT_MS: u64 = 15_000;
 
 pub async fn click(session: &BrowserSession, selector: &str) -> BrowserResult<()> {

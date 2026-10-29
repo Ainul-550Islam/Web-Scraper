@@ -43,4 +43,25 @@ export const API_ROUTES: ApiRoute[] = [
   { method: "GET", path: "/control/artifacts/:id", auth: "bearer-if-configured", summary: "Artifact metadata and verification state — never bytes, never a path", doc: "25-artifact-downloads.md" },
   { method: "GET", path: "/artifacts/:id", auth: "bearer-if-configured", summary: "Download one finalized, verified artifact by registry id", doc: "25-artifact-downloads.md" },
   { method: "GET", path: "/artifacts/:id/verify", auth: "bearer-if-configured", summary: "Re-verify the delivery an artifact belongs to (manifest + checksums)", doc: "25-artifact-downloads.md" },
+
+  // ---- managed customer surface (`/v1/*`) --------------------------------
+  // Mirrored from `src/admin.rs::managed_route` and pinned by
+  // `tests/route_contract.rs`. Customer routes authenticate with a tenant api
+  // key; the `/v1/admin/*` half keeps the console bearer.
+  { method: "POST", path: "/v1/scrape", auth: "api-key", summary: "Run one bounded scrape: SSRF-guarded, robots-checked, metered, one canonical response", params: "JSON body (url, format, render, extract, wait, limits, webhook_url), Idempotency-Key", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/jobs", auth: "api-key", summary: "Create a scheduled scrape job (bounded repeat/interval, durable registry)", params: "JSON body (scrape, schedule, limits, webhook_url), Idempotency-Key", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/jobs", auth: "api-key", summary: "Paged list of this tenant's jobs", params: "limit", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/jobs/:id", auth: "api-key", summary: "One job with its response, records and last error", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/jobs/:id/cancel", auth: "api-key", summary: "Cancel a queued job (terminal jobs answer 409)", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/usage", auth: "api-key", summary: "This key's metered usage plus the verified ledger head", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/openapi.json", auth: "open-contract", summary: "The OpenAPI 3.1 document generated from the route table (byte-identical to docs/openapi.json)", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/tenants", auth: "bearer-if-configured", summary: "Create a tenant (operator half of the managed surface)", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/admin/tenants", auth: "bearer-if-configured", summary: "Tenant and key counts", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/keys", auth: "bearer-if-configured", summary: "Issue an api key: SHA-256 at rest, scopes, limits, expiry; plaintext shown once", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/admin/keys", auth: "bearer-if-configured", summary: "List keys for a tenant (hashes and metadata only, never plaintext)", params: "tenant_id", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/keys/:id/rotate", auth: "bearer-if-configured", summary: "Rotate a key: revoke the old hash and issue a replacement", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/keys/:id/revoke", auth: "bearer-if-configured", summary: "Revoke a key immediately", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/keys/:id/suspend", auth: "bearer-if-configured", summary: "Suspend a key for an operator-chosen reason", doc: "26-managed-scrape-api.md" },
+  { method: "GET", path: "/v1/admin/usage", auth: "bearer-if-configured", summary: "Aggregate usage across tenants (console bearer, not an api key)", params: "tenant_id, key_id, format", doc: "26-managed-scrape-api.md" },
+  { method: "POST", path: "/v1/admin/usage/export", auth: "bearer-if-configured", summary: "Export the usage ledger as JSON lines or CSV into the configured export directory", doc: "26-managed-scrape-api.md" },
 ];

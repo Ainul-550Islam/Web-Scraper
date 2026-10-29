@@ -45,3 +45,6 @@ pub use error::{BrowserError, BrowserResult};
 pub use page::{PageArtifactRef, PageObservation};
 #[cfg(feature = "browser")]
 pub use runtime::BrowserRuntime;
+
+#[cfg(test)]
+mod tests;

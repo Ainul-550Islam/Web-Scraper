@@ -106,10 +106,17 @@ impl Workflow {
         fn check(steps: &[WorkflowStep]) -> Result<()> {
             for step in steps {
                 match step {
-                    WorkflowStep::Input { value: InputValue::Literal { .. }, .. } => {
+                    WorkflowStep::Input {
+                        value: InputValue::Literal { .. },
+                        ..
+                    } => {
                         bail!("persisted workflow inputs must use secret_ref, not literal values");
                     }
-                    WorkflowStep::Branch { then_steps, else_steps, .. } => {
+                    WorkflowStep::Branch {
+                        then_steps,
+                        else_steps,
+                        ..
+                    } => {
                         check(then_steps)?;
                         check(else_steps)?;
                     }

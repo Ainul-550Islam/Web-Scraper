@@ -19,7 +19,9 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: HOSTS,
     proxy: {
-      "/api": {
+      // Trailing slash on purpose: the console has a real route at `/api-keys`,
+      // and a bare `/api` prefix would swallow it into the backend rewrite.
+      "/api/": {
         target: BACKEND,
         changeOrigin: false,
         rewrite: (p) => p.replace(/^\/api/, ""),

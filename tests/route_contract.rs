@@ -92,8 +92,9 @@ fn open_routes_are_exactly_health_and_live() {
 #[test]
 fn mutations_are_only_the_documented_set() {
     // Every POST is a mutation, so the set is pinned: the two operator
-    // actions plus the four control-plane submissions (each authenticated,
-    // bounded, audited, and idempotent where it matters).
+    // actions, the four control-plane submissions, the three customer
+    // mutations and the six operator-half key/usage mutations. Each is
+    // authenticated, bounded, audited and idempotent where it matters.
     let routes = manifest_routes();
     let posts: BTreeSet<_> = routes
         .iter()
@@ -109,8 +110,44 @@ fn mutations_are_only_the_documented_set() {
             "/control/export".to_string(),
             "/control/ai".to_string(),
             "/control/jobs/:id/cancel".to_string(),
+            "/v1/scrape".to_string(),
+            "/v1/jobs".to_string(),
+            "/v1/jobs/:id/cancel".to_string(),
+            "/v1/admin/tenants".to_string(),
+            "/v1/admin/keys".to_string(),
+            "/v1/admin/keys/:id/rotate".to_string(),
+            "/v1/admin/keys/:id/revoke".to_string(),
+            "/v1/admin/keys/:id/suspend".to_string(),
+            "/v1/admin/usage/export".to_string(),
         ])
     );
+}
+
+#[test]
+fn customer_routes_are_api_key_gated_in_the_manifest() {
+    // The customer half of `/v1/*` authenticates with a tenant api key, the
+    // operator half with the console bearer. Mixing them up would either
+    // expose a customer route to the console token or break the console.
+    let manifest = read("web/src/lib/apiRoutes/API_ROUTES.ts");
+    for line in manifest.lines() {
+        if !line.contains("\"/v1/") {
+            continue;
+        }
+        let path = line.split("\"").nth(3).unwrap_or("");
+        let expected = if path.starts_with("/v1/admin/") {
+            "bearer-if-configured"
+        } else if path == "/v1/openapi.json" {
+            // The contract document itself: a client must be able to read it
+            // before it knows which keys to ask for.
+            "open-contract"
+        } else {
+            "api-key"
+        };
+        assert!(
+            line.contains(&format!("auth: \"{expected}\"")),
+            "unexpected auth for {path}: {line}"
+        );
+    }
 }
 
 #[test]

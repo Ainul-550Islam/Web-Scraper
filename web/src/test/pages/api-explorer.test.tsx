@@ -27,14 +27,7 @@ describe("ApiExplorer", () => {
     await mountPage(<ApiExplorer />);
     await screen.findByText("API Explorer");
     const rows = () => within(document.querySelector("table")!);
-    const mutations = [
-      "/alerts/ack",
-      "/ops/note",
-      "/control/crawl",
-      "/control/export",
-      "/control/ai",
-      "/control/jobs/:id/cancel",
-    ];
+    const mutations = API_ROUTES.filter((r) => r.method === "POST").map((r) => r.path).sort();
     fireEvent.click(screen.getByRole("button", { name: /POST/ }));
     for (const path of mutations) {
       expect(rows().getByText(path, { selector: "code" })).toBeTruthy();

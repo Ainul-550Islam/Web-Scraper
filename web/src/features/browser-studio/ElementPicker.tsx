@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, EmptyState, TextInput } from "../../../components/ui";
+import { Button, EmptyState, TextInput } from "../../components/ui";
 
 export interface ElementChoice { selector: string; tag: string; text: string; path: string }
 

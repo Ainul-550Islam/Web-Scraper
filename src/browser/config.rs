@@ -306,8 +306,10 @@ mod tests {
 
     #[test]
     fn webdriver_credentials_are_rejected() {
-        let mut cfg = BrowserConfig::default();
-        cfg.webdriver_url = Some("https://user:secret@example.test/wd/hub".into());
+        let cfg = BrowserConfig {
+            webdriver_url: Some("https://user:secret@example.test/wd/hub".into()),
+            ..BrowserConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

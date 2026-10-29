@@ -4,7 +4,7 @@ use super::session::BrowserSession;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatePredicates {
     pub signed_in_selector: Option<String>,
@@ -13,18 +13,6 @@ pub struct StatePredicates {
     pub content_ready_selector: Option<String>,
     pub session_expired_selector: Option<String>,
 }
-impl Default for StatePredicates {
-    fn default() -> Self {
-        Self {
-            signed_in_selector: None,
-            signed_out_selector: None,
-            consent_selector: None,
-            content_ready_selector: None,
-            session_expired_selector: None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebsiteState {

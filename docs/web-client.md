@@ -21,7 +21,7 @@ web/
 │   │                 FormSection, PipelineNode/Connector + canonical
 │   │                 aliases), Overlays (Modal/Drawer/Confirm/Toasts/
 │   │                 CommandPalette), Icons (single inline-SVG registry)
-│   ├── app/          hash router + route registry (26 pages, lazy chunks)
+│   ├── app/          hash router + route registry (29 pages, lazy chunks)
 │   ├── features/     one folder per page (Overview … ConfigStudio, ApiExplorer)
 │   └── test/         vitest harness + fixtures captured from the live API
 ├── vite.config.ts    dev proxy /api → admin addr, manualChunks, test block

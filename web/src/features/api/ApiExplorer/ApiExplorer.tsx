@@ -73,7 +73,14 @@ export default function ApiExplorer() {
           {
             key: "auth",
             label: "Auth",
-            render: (r) => (r.auth === "always-open" ? "open" : "bearer if set"),
+            render: (r) => (
+            r.auth === "always-open"
+              ? "open"
+              : r.auth === "open-contract"
+                ? "contract"
+                : r.auth === "api-key"
+                  ? "api key"
+                  : "bearer if set"),
           },
           { key: "summary", label: "Response / behavior", render: (r) => r.summary },
           {

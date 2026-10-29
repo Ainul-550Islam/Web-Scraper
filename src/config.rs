@@ -10,6 +10,349 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 /// Conservative aggregate reservation for simultaneously buffered responses.
 pub const MAX_IN_FLIGHT_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// Managed customer API (`/v1/*`) bounds. Every one of these is a ceiling, not
+// a default: the managed API is a revenue surface, so an unbounded queue, an
+// unbounded idempotency cache or an unbounded webhook retry ladder would turn
+// one noisy tenant into an availability problem for every other tenant.
+// ---------------------------------------------------------------------------
+
+/// Largest accepted `POST /v1/scrape` / `POST /v1/jobs` body.
+pub const V1_BODY_LIMIT: u64 = 64 * 1024;
+/// Jobs kept in the in-memory registry before the oldest is reaped.
+pub const V1_MAX_JOBS: usize = 5_000;
+/// How long a terminal job stays queryable before it is dropped.
+pub const V1_JOB_TTL_SECS: u64 = 7 * 86_400;
+/// Idempotency records kept per tenant before the oldest expires.
+pub const V1_IDEMPOTENCY_MAX: usize = 10_000;
+/// How long a replayed idempotency record is honoured.
+pub const V1_IDEMPOTENCY_TTL_SECS: u64 = 24 * 3600;
+/// Webhook delivery attempts before the payload is dead-lettered.
+pub const V1_WEBHOOK_MAX_ATTEMPTS: u32 = 5;
+/// Per-attempt webhook timeout.
+pub const V1_WEBHOOK_TIMEOUT_MS: u64 = 10_000;
+/// Largest synchronous `POST /v1/scrape` wait.
+pub const V1_SCRAPE_WAIT_MS: u64 = 30_000;
+/// Row cap for `GET /v1/usage`.
+pub const V1_USAGE_QUERY_MAX_ROWS: usize = 5_000;
+/// Maximum number of API keys a single tenant may hold.
+pub const V1_MAX_KEYS_PER_TENANT: usize = 50;
+/// Usage ledger append batch size (entries per flush).
+pub const V1_LEDGER_BATCH: usize = 256;
+/// Maximum size of the usage ledger file before rotation.
+pub const V1_LEDGER_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Longest URL a customer may ask for, in bytes.
+pub const V1_MAX_URL_LEN: usize = 2_048;
+/// Longest webhook URL a customer may register, in bytes.
+pub const V1_WEBHOOK_URL_MAX_LEN: usize = 2_048;
+/// Redirect hops followed for one managed request.
+pub const V1_MAX_REDIRECTS: u32 = 5;
+/// Timeout for one managed request, milliseconds.
+pub const V1_REQUEST_TIMEOUT_MS: u64 = 60_000;
+/// Longest the renderer may wait for a selector, milliseconds.
+pub const V1_RENDER_TIMEOUT_MS: u64 = 30_000;
+/// Records one selector tree may emit.
+pub const V1_MAX_RECORDS: usize = 5_000;
+/// Field rules one request may carry.
+pub const V1_EXTRACT_MAX_FIELDS: usize = 128;
+/// Jobs listed by `GET /v1/jobs` in one response.
+pub const V1_JOBS_MAX_LIST: usize = 200;
+/// Idempotency records retained per key.
+pub const V1_IDEMPOTENCY_KEYS: u32 = 1_000;
+/// Webhooks listed in one dead-letter read.
+pub const V1_WEBHOOK_LIST_MAX: usize = 500;
+
+/// Pricing table for usage units. Pure data: the calculation lives in
+/// `crate::scrape_api::pricing` so it can be unit tested without config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PricingTable {
+    /// Units charged for every request, whatever it does.
+    pub base_units: u32,
+    /// Extra units when `render` is `browser`.
+    pub render_units: u32,
+    /// Extra units when a screenshot artifact is requested.
+    pub screenshot_units: u32,
+    /// Extra units per proxy region, keyed by region name.
+    pub proxy_region_units: BTreeMap<String, u32>,
+    /// Units charged per 1024 response bytes.
+    pub per_1k_bytes: u32,
+    /// Units charged for a field-extraction pass.
+    pub extract_units: u32,
+    /// Units charged for a selector-tree extraction pass.
+    pub selector_units: u32,
+    /// Units charged for a non-empty transform list.
+    pub transform_units: u32,
+    /// Units charged per 1024 artifact bytes.
+    pub artifact_units_per_k: u32,
+    /// Currency the rate is denominated in.
+    pub currency: String,
+    /// Price of one unit, in `currency`.
+    pub rate: f64,
+}
+
+impl Default for PricingTable {
+    fn default() -> Self {
+        Self {
+            base_units: 1,
+            render_units: 3,
+            screenshot_units: 2,
+            proxy_region_units: BTreeMap::new(),
+            per_1k_bytes: 1,
+            extract_units: 1,
+            selector_units: 2,
+            transform_units: 1,
+            artifact_units_per_k: 1,
+            currency: "USD".to_string(),
+            rate: 0.000_01,
+        }
+    }
+}
+
+/// Bounds for the asynchronous job registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobQueueCfg {
+    pub max_jobs: usize,
+    pub ttl_secs: u64,
+    pub enabled: bool,
+    /// Browser workers driving jobs.
+    pub workers: u32,
+    /// Longest a single job step may wait, milliseconds.
+    pub max_browser_ms: u64,
+    /// Records one job may collect.
+    pub max_records: usize,
+    /// Longest a job may repeat on, minutes.
+    pub max_interval_minutes: u32,
+    /// Jobs listed by `GET /v1/jobs` in one response.
+    pub jobs_max_list: usize,
+}
+
+impl Default for JobQueueCfg {
+    fn default() -> Self {
+        Self {
+            max_jobs: V1_MAX_JOBS,
+            ttl_secs: V1_JOB_TTL_SECS,
+            enabled: true,
+            workers: 2,
+            max_browser_ms: V1_SCRAPE_WAIT_MS,
+            max_records: V1_MAX_RECORDS,
+            max_interval_minutes: 1_440,
+            jobs_max_list: V1_JOBS_MAX_LIST,
+        }
+    }
+}
+
+/// Bounds for signed webhook delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebhookCfg {
+    pub max_attempts: u32,
+    pub timeout_ms: u64,
+    /// Retry ladder: `retry_base_ms * 2^attempt`, capped at `retry_cap_ms`.
+    pub retry_base_ms: u64,
+    pub retry_cap_ms: u64,
+    /// Where exhausted deliveries are written as JSON lines.
+    pub dead_letter_path: Option<PathBuf>,
+    /// Master switch. Off by default: an operator must opt in before a
+    /// customer can register a callback.
+    pub enabled: bool,
+    /// Hosts a customer may register as a webhook endpoint. Empty means any
+    /// public host.
+    pub allowed_hosts: Vec<String>,
+    /// Explicit retry schedule in milliseconds; empty means the
+    /// `retry_base_ms`/`retry_cap_ms` ladder.
+    pub retry_schedule_ms: Vec<u64>,
+    /// HMAC key used to sign deliveries. Generated per deployment.
+    pub delivery_key: String,
+    /// Salt mixed into the dead-letter signature so a replayed payload is
+    /// distinguishable from the original attempt.
+    pub dead_letter_salt: String,
+    /// Maximum webhooks returned by one dead-letter read.
+    pub list_max: usize,
+}
+
+impl Default for WebhookCfg {
+    fn default() -> Self {
+        Self {
+            max_attempts: V1_WEBHOOK_MAX_ATTEMPTS,
+            timeout_ms: V1_WEBHOOK_TIMEOUT_MS,
+            retry_base_ms: 1_000,
+            retry_cap_ms: 30_000,
+            dead_letter_path: None,
+            enabled: false,
+            allowed_hosts: Vec::new(),
+            retry_schedule_ms: Vec::new(),
+            delivery_key: "dev-only-delivery-key".to_string(),
+            dead_letter_salt: "dev-only-dead-letter-salt".to_string(),
+            list_max: V1_WEBHOOK_LIST_MAX,
+        }
+    }
+}
+
+/// The managed customer API section. Disabled by default: mounting `/v1/*`
+/// opens a second, API-key-authenticated surface on the same port as the
+/// operator console, so it stays off unless an operator asks for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ManagedApiCfg {
+    pub enabled: bool,
+    /// Root directory for the tenancy store, usage ledger and dead-letter
+    /// queue. Defaults to `<state dir>/managed-api`.
+    pub data_dir: Option<PathBuf>,
+    /// Limits applied to keys created without an explicit limits block.
+    pub default_limits: crate::tenancy::limits::KeyLimits,
+    pub pricing: PricingTable,
+    pub jobs: JobQueueCfg,
+    pub webhook: WebhookCfg,
+    /// Request body ceiling for `POST /v1/*`, in bytes.
+    pub max_request_bytes: u64,
+    /// Redirect hops followed before a request is refused.
+    pub max_redirects: u32,
+    /// Whole-request timeout, milliseconds.
+    pub request_timeout_ms: u64,
+    /// Longest URL accepted, in bytes.
+    pub max_url_len: usize,
+    /// Longest webhook URL accepted, in bytes.
+    pub webhook_url_max_len: usize,
+    /// Records one selector tree may emit.
+    pub max_records: usize,
+    /// Field rules accepted in one request.
+    pub extract_max_fields: usize,
+    /// Renderer wait ceiling, milliseconds.
+    pub render_timeout_ms: u64,
+    /// Retention for idempotency records, milliseconds.
+    pub idempotency_retention_ms: u64,
+    /// Idempotency records retained per key.
+    pub idempotency_max_records: u32,
+    /// Keys allowed per tenant.
+    pub max_keys_per_tenant: usize,
+    /// Directory holding the append-only usage ledger. Derived from
+    /// `data_dir` when unset.
+    #[serde(default)]
+    pub ledger_dir: Option<PathBuf>,
+    /// Directory holding exported usage files. Derived from `data_dir`
+    /// when unset.
+    #[serde(default)]
+    pub export_dir: Option<PathBuf>,
+    /// Test/demo escape hatch: lets the SSRF guard accept loopback and
+    /// private targets so a local demo origin can be scraped. Off by
+    /// default and startup-warned when on — never enable it on a host that
+    /// can reach anything you would rather not expose.
+    pub allow_private_targets: bool,
+}
+
+impl Default for ManagedApiCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            data_dir: None,
+            default_limits: crate::tenancy::limits::KeyLimits::default(),
+            pricing: PricingTable::default(),
+            jobs: JobQueueCfg::default(),
+            webhook: WebhookCfg::default(),
+            allow_private_targets: false,
+            max_request_bytes: V1_BODY_LIMIT,
+            max_redirects: V1_MAX_REDIRECTS,
+            request_timeout_ms: V1_REQUEST_TIMEOUT_MS,
+            max_url_len: V1_MAX_URL_LEN,
+            webhook_url_max_len: V1_WEBHOOK_URL_MAX_LEN,
+            max_records: V1_MAX_RECORDS,
+            extract_max_fields: V1_EXTRACT_MAX_FIELDS,
+            render_timeout_ms: V1_RENDER_TIMEOUT_MS,
+            idempotency_retention_ms: V1_IDEMPOTENCY_TTL_SECS * 1_000,
+            idempotency_max_records: V1_IDEMPOTENCY_KEYS,
+            max_keys_per_tenant: V1_MAX_KEYS_PER_TENANT,
+            ledger_dir: None,
+            export_dir: None,
+        }
+    }
+}
+
+impl ManagedApiCfg {
+    /// Bounds-check the section. Called from `Config::validate`, so a
+    /// misconfiguration fails at startup rather than at the first request.
+    pub fn validate(&self) -> Result<()> {
+        if self.enabled && self.allow_private_targets {
+            // Not an error: it is an explicitly opt-in demo/test mode. It is
+            // however loud enough that an operator cannot miss it.
+            tracing::warn!(
+                "managed_api.allow_private_targets is enabled: the SSRF guard will                  accept loopback and private targets (demo/test only)"
+            );
+        }
+        if self.jobs.max_jobs == 0 || self.jobs.max_jobs > V1_MAX_JOBS {
+            bail!(
+                "managed_api.jobs.max_jobs must be in 1..={V1_MAX_JOBS} (got {})",
+                self.jobs.max_jobs
+            );
+        }
+        if self.jobs.ttl_secs == 0 || self.jobs.ttl_secs > 30 * 86_400 {
+            bail!(
+                "managed_api.jobs.ttl_secs must be in 1..={} (got {})",
+                30 * 86_400,
+                self.jobs.ttl_secs
+            );
+        }
+        if self.webhook.max_attempts == 0 || self.webhook.max_attempts > 16 {
+            bail!(
+                "managed_api.webhook.max_attempts must be in 1..=16 (got {})",
+                self.webhook.max_attempts
+            );
+        }
+        if self.webhook.timeout_ms == 0 || self.webhook.timeout_ms > 120_000 {
+            bail!(
+                "managed_api.webhook.timeout_ms must be in 1..=120000 (got {})",
+                self.webhook.timeout_ms
+            );
+        }
+        if self.webhook.retry_base_ms == 0 || self.webhook.retry_cap_ms < self.webhook.retry_base_ms
+        {
+            bail!(
+                "managed_api.webhook retry bounds must satisfy 0 < retry_base_ms <= retry_cap_ms"
+            );
+        }
+        if let Some(dir) = &self.data_dir {
+            if dir.as_os_str().is_empty()
+                || dir.to_string_lossy().chars().any(char::is_control)
+                || dir.to_string_lossy().len() > 4096
+            {
+                bail!("managed_api.data_dir must be a non-empty path under 4096 bytes");
+            }
+        }
+        self.default_limits
+            .validate()
+            .map_err(|e| anyhow::anyhow!("managed_api.default_limits: {e}"))?;
+        let p = &self.pricing;
+        if p.base_units == 0 || p.base_units > 1_000 {
+            bail!("managed_api.pricing.base_units must be in 1..=1000");
+        }
+        if p.per_1k_bytes > 1_000 {
+            bail!("managed_api.pricing.per_1k_bytes must be at most 1000");
+        }
+        if p.proxy_region_units.len() > 64 {
+            bail!("managed_api.pricing.proxy_region_units supports at most 64 regions");
+        }
+        Ok(())
+    }
+
+    /// The ledger directory: the configured one, or `<data dir>/ledger`.
+    pub fn ledger_dir(&self) -> PathBuf {
+        self.ledger_dir
+            .clone()
+            .or_else(|| self.data_dir.clone().map(|d| d.join("ledger")))
+            .unwrap_or_else(|| PathBuf::from("state/managed-api/ledger"))
+    }
+
+    /// The export directory: the configured one, or `<data dir>/exports`.
+    pub fn export_dir(&self) -> PathBuf {
+        self.export_dir
+            .clone()
+            .or_else(|| self.data_dir.clone().map(|d| d.join("exports")))
+            .unwrap_or_else(|| PathBuf::from("state/managed-api/exports"))
+    }
+}
+
 /// Whole-engine configuration. Loaded from a single JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -139,6 +482,10 @@ pub struct Config {
     /// Opt-in W3C WebDriver runtime. HTTP-only remains the default transport.
     #[serde(default)]
     pub browser: crate::browser::config::BrowserConfig,
+    /// Managed customer API (`/v1/*`): tenancy, per-key limits, scrape and
+    /// job endpoints, signed webhooks and usage metering.
+    #[serde(default)]
+    pub managed_api: ManagedApiCfg,
     pub proxies: Vec<ProxyCfg>,
     pub targets: Vec<TargetCfg>,
     pub output: SinkCfg,
@@ -264,6 +611,7 @@ impl Default for Config {
             ckpt_every_pages: default_ckpt_pages(),
             revalidate_store: None,
             revalidate_ttl_secs: 0,
+            managed_api: ManagedApiCfg::default(),
             audit_path: None,
             attest_key_path: None,
             redis_url: None,
@@ -714,6 +1062,7 @@ impl Config {
         "max_pages",
         "max_records_per_run",
         "max_response_bytes",
+        "managed_api",
         "max_retries",
         "max_single_wait_ms",
         "metrics_addr",
@@ -901,6 +1250,7 @@ impl Config {
                 "browser runtime is enabled in config but this binary lacks `--features browser`"
             );
         }
+        self.managed_api.validate()?;
         if let Some(url) = &self.redis_url {
             validate_redis_url(url)?;
         }

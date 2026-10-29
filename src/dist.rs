@@ -1045,6 +1045,49 @@ async fn handle_job(
                 };
                 (fields, hrefs)
             }
+            // The two tree backends are selected by `target.mode`; `harvest
+            // validate` refuses a target that declares a tree mode without a
+            // selector tree, so a missing tree here is a startup-time
+            // contradiction, not a runtime one.
+            ExtractMode::TreeHtml => {
+                let tree = tcfg
+                    .selector_tree
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("validated selector tree disappeared"))?;
+                let rows = crate::selector::engine::extract(&outcome.body, tree, 10_000)?;
+                let hrefs = if tcfg.follow_links && job.depth < tcfg.max_depth {
+                    let doc = Html::parse_document(&outcome.body);
+                    let selector = tcfg
+                        .link_selector
+                        .as_deref()
+                        .and_then(|s| Selector::parse(s).ok())
+                        .unwrap_or_else(|| {
+                            Selector::parse("a[href]").expect("validated at startup")
+                        });
+                    extract::links_bounded(&doc, &selector, cfg.max_pages.min(tcfg.max_pages))
+                } else {
+                    Vec::new()
+                };
+                (
+                    rows.first()
+                        .map(|r| r.to_value().as_object().cloned().unwrap_or_default())
+                        .unwrap_or_default(),
+                    hrefs,
+                )
+            }
+            ExtractMode::TreeJson => {
+                let tree = tcfg
+                    .selector_tree
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("validated selector tree disappeared"))?;
+                let rows = crate::selector::engine::extract_json(&outcome.body, tree, 10_000)?;
+                (
+                    rows.first()
+                        .map(|r| r.to_value().as_object().cloned().unwrap_or_default())
+                        .unwrap_or_default(),
+                    Vec::new(),
+                )
+            }
         };
         let po = pipelines[job.target].apply(&mut fields, url.as_str(), job.depth)?;
         for _ in 0..po.drift {

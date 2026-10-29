@@ -4,28 +4,22 @@ use super::api_models::BrowserJobDto;
 use super::api_models::*;
 use super::artifacts::BrowserArtifactStore;
 use super::config::BrowserConfig;
+#[cfg(feature = "browser")]
+use super::credentials::EnvironmentCredentialResolver;
 use super::error::{BrowserError, BrowserResult};
+#[cfg(feature = "browser")]
+use super::interaction;
 use super::jobs::{BrowserJobLease, BrowserJobQueue};
+#[cfg(feature = "browser")]
+use super::navigation::{self, WaitUntil};
 use super::page::PageObservation;
 use super::repository::{BrowserRepository, StoredWorkflow};
 #[cfg(feature = "browser")]
-use std::collections::{BTreeMap, HashMap};
-#[cfg(feature = "browser")]
-use super::credentials::EnvironmentCredentialResolver;
-#[cfg(feature = "browser")]
-use super::interaction;
-#[cfg(feature = "browser")]
-use super::navigation::{self, WaitUntil};
-#[cfg(feature = "browser")]
-use super::page::PageArtifactRef;
-#[cfg(feature = "browser")]
 use super::session::BrowserSession;
-#[cfg(feature = "browser")]
-use super::workflow::{InputValue, Workflow, WorkflowStep};
 #[cfg(feature = "browser")]
 use crate::selector::engine;
 #[cfg(feature = "browser")]
-use serde_json::json;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -81,7 +75,10 @@ impl BrowserApi {
     }
     #[cfg(feature = "browser")]
     pub fn with_targets(mut self, targets: Vec<crate::config::TargetCfg>) -> Self {
-        self.targets = targets.into_iter().map(|target| (target.id.clone(), target)).collect();
+        self.targets = targets
+            .into_iter()
+            .map(|target| (target.id.clone(), target))
+            .collect();
         self
     }
     #[cfg(feature = "browser")]
@@ -91,7 +88,9 @@ impl BrowserApi {
         artifact_root: impl Into<PathBuf>,
     ) -> BrowserResult<Self> {
         let api = Self::new(config, repository, artifact_root)?;
-        if api.config.enabled { api.ensure_runtime().await?; }
+        if api.config.enabled {
+            api.ensure_runtime().await?;
+        }
         Ok(api)
     }
     #[cfg(feature = "browser")]
@@ -115,13 +114,27 @@ impl BrowserApi {
     }
     #[cfg(feature = "browser")]
     async fn ensure_runtime(&self) -> BrowserResult<super::runtime::BrowserRuntime> {
-        if let Ok(runtime)=self.runtime(){return Ok(runtime);}
-        if !self.config.enabled{return Err(BrowserError::Policy("browser support is disabled by configuration".into()));}
-        let _guard=self.startup.lock().await;
-        if let Ok(runtime)=self.runtime(){return Ok(runtime);}
+        if let Ok(runtime) = self.runtime() {
+            return Ok(runtime);
+        }
+        if !self.config.enabled {
+            return Err(BrowserError::Policy(
+                "browser support is disabled by configuration".into(),
+            ));
+        }
+        let _guard = self.startup.lock().await;
+        if let Ok(runtime) = self.runtime() {
+            return Ok(runtime);
+        }
         match super::runtime::BrowserRuntime::launch(self.config.clone()).await {
-            Ok(runtime)=>{self.attach_runtime(runtime.clone());Ok(runtime)}
-            Err(error)=>{self.set_start_error(&error);Err(error)}
+            Ok(runtime) => {
+                self.attach_runtime(runtime.clone());
+                Ok(runtime)
+            }
+            Err(error) => {
+                self.set_start_error(&error);
+                Err(error)
+            }
         }
     }
 
@@ -200,7 +213,7 @@ impl BrowserApi {
             if let Some(html) = page.html.as_deref() {
                 let r = super::artifacts::store_dom(
                     &self.artifacts,
-                    &session.id(),
+                    session.id(),
                     html,
                     self.config.max_html_bytes,
                 )?;
@@ -501,6 +514,14 @@ impl BrowserApi {
                     "preview URL is outside the existing session scope".into(),
                 ));
             }
+            // A session is scoped to the target that created it: reusing its
+            // id for a different target would let one target's authorized
+            // hosts cover another target's request.
+            if !scope.target_id.eq_ignore_ascii_case(&request.target_id) {
+                return Err(BrowserError::Policy(
+                    "browser session was created for a different target".into(),
+                ));
+            }
             return Ok((id.clone(), scope.runtime_key, scope.allowed_hosts));
         }
         let id = if request.request_id.len() <= 96 {
@@ -526,6 +547,7 @@ impl BrowserApi {
         let key = format!("api-{id}");
         let entry = SessionScope {
             runtime_key: key.clone(),
+            target_id: request.target_id.clone(),
             allowed_hosts: hosts.clone(),
             created_at_ms: super::page::now_ms(),
         };
@@ -548,7 +570,8 @@ impl BrowserApi {
     async fn get_session(&self, id: &str) -> BrowserResult<Arc<BrowserSession>> {
         validate_session_id(id)?;
         let scope = self.scope_for(id)?;
-        self.ensure_runtime().await?
+        self.ensure_runtime()
+            .await?
             .session(&scope.runtime_key, None, None)
             .await
     }
@@ -626,6 +649,10 @@ fn validate_preview(request: &BrowserPreviewRequest) -> BrowserResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Workflow` is always compiled (the workflow module is not feature-gated);
+    // only the parent import is, so resolve it here for both builds.
+    use crate::browser::workflow::Workflow;
+
     #[test]
     fn preview_rejects_credential_urls() {
         let r = BrowserPreviewRequest {

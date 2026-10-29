@@ -50,7 +50,19 @@ a test exists that exercises it (run `cargo test --all-features` /
 | Sitemap seeding | `src/sitemap.rs` | core | sitemap.rs | src/sitemap/tests.rs |
 | Dead-letter replay | `src/runner.rs` | core | runner.rs | `harvest run --retry-dlq` |
 | Graceful SIGINT/SIGTERM drain | `src/engine.rs` | core | engine.rs | tests/e2e.rs; buyer E2E last check |
-| React console (26 routes, live polling) | `web/src` | — | web/src/app/routes/ROUTES.ts | 368 Vitest tests across 126 files; 12 smoke checks; 18 buyer E2E checks |
+| Tenant keys: SHA-256 digest at rest, scopes, status, expiry | `src/tenancy/` | core | tenancy.rs, key.rs, scope.rs | src/tenancy/tests.rs (58); tests/tenancy_security.rs (11) |
+| Per-key limits: rps/burst, concurrency, monthly quota, bytes, domains | `src/tenancy/limits.rs`, `src/ratelimit.rs` | core | limits.rs, ratelimit.rs | src/ratelimit/tests.rs (20); src/tenancy/tests.rs |
+| SSRF guard: loopback/private/link-local/multicast/metadata, IPv6 + mapped, every redirect hop | `src/ssrf.rs` | core | ssrf.rs | src/ssrf/tests.rs (27); tests/managed_api.rs |
+| Append-only hash-chained usage ledger | `src/usage/ledger.rs` | core | ledger.rs | src/usage/tests.rs (24); tests/managed_api.rs |
+| Usage aggregation (per key / per day / totals) + JSONL/CSV export | `src/usage/aggregate.rs`, `src/usage/export.rs` | core | aggregate.rs, export.rs | src/usage/tests.rs; `GET /v1/usage`, `POST /v1/admin/usage/export` |
+| `POST /v1/scrape` (+ idempotent replay), `/v1/jobs*`, `/v1/usage` | `src/scrape_api/handlers.rs`, `src/scrape_api/service.rs` | core (off by default) | handlers.rs, service.rs | tests/managed_api.rs (18); tests/route_contract.rs pins every route |
+| Job queue: bounded repeats, cancellation, terminal-job conflict | `src/scrape_api/jobs.rs` | core (off by default) | jobs.rs | tests/managed_api.rs; src/scrape_api/tests.rs (30) |
+| HMAC-SHA256 webhooks, retry ladder, dead-letter | `src/scrape_api/webhook.rs` | core (off by default) | webhook.rs | tests/managed_api.rs; src/scrape_api/tests.rs |
+| Generated OpenAPI 3.1 + checked-in byte-identical copy | `src/scrape_api/openapi.rs` | core | openapi.rs | tests/openapi_contract.rs (7); docs/openapi.json; `GET /v1/openapi.json` |
+| Managed API counters (requests, rate-limited, quota, units, jobs, webhooks) | `src/metrics.rs` | core | metrics.rs | `GET /metrics`; src/scrape_api/tests.rs |
+| API Keys console (one-time reveal, rotate/suspend/revoke) | `web/src/features/managed/keys/` | — | ApiKeys.tsx, KeyReveal.tsx | api-keys-page.test.tsx (9), key-reveal.test.tsx (4) |
+| Usage console (filterable metering + export) | `web/src/features/managed/usage/` | — | Usage.tsx | usage-page.test.tsx (8) |
+| React console (29 routes, live polling) | `web/src` | — | web/src/app/routes/ROUTES.ts | 394 Vitest tests across 129 files; 12 smoke checks; 18 buyer E2E checks |
 | Product tour + first-run welcome (real data) | `web/src/components/AppShell/` | — | ProductTour.tsx, WelcomePanel.tsx | product-tour/welcome-panel tests |
 | Health summary (6 groups) on Overview | `web/src/features/overview/Overview/HealthSummary.tsx` | — | HealthSummary.tsx | overview-health-summary.test.tsx |
 | Quality funnel w/ separate quarantine | `web/src/features/quality/` | — | Quality.tsx | quality page test (existing suite) |

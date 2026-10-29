@@ -1,5 +1,5 @@
 {
-  "_note": "LOCAL/DEMO config: safe to run as-is (binds loopback, no secrets). For production: set admin_token (e.g. \"${HARVEST_ADMIN_TOKEN}\" — the engine expands whole-value ${VAR} references from the environment), keep or raise max_response_bytes, and read SECURITY.md before rebinding metrics_addr.",
+  "_note": "LOCAL/DEMO config: safe to run as-is (binds loopback, no secrets). For production: set admin_token (e.g. \"${HARVEST_ADMIN_TOKEN}\" \u2014 the engine expands whole-value ${VAR} references from the environment), keep or raise max_response_bytes, and read SECURITY.md before rebinding metrics_addr.",
   "name": "client-demo-run",
   "user_agent": "harvest/0.1 (acme-data-bot; contact: data@acme.example)",
   "respect_robots": true,
@@ -135,5 +135,71 @@
         "max_block_rate": 0.25
       }
     }
-  }
+  },
+  "managed_api": {
+    "enabled": false,
+    "data_dir": "state/managed-api",
+    "ledger_dir": "state/managed-api/ledger",
+    "export_dir": "state/managed-api/exports",
+    "allow_private_targets": false,
+    "max_request_bytes": 65536,
+    "max_redirects": 5,
+    "request_timeout_ms": 60000,
+    "max_url_len": 2048,
+    "webhook_url_max_len": 2048,
+    "max_records": 5000,
+    "extract_max_fields": 128,
+    "render_timeout_ms": 30000,
+    "idempotency_retention_ms": 86400000,
+    "idempotency_max_records": 1000,
+    "max_keys_per_tenant": 50,
+    "default_limits": {
+      "rps": 5.0,
+      "burst": 10,
+      "max_concurrent_jobs": 2,
+      "monthly_quota": 100000,
+      "max_response_bytes": 16777216,
+      "allowed_domains": [],
+      "scopes": [
+        "scrape"
+      ]
+    },
+    "pricing": {
+      "base_units": 1,
+      "render_units": 3,
+      "screenshot_units": 2,
+      "proxy_region_units": {},
+      "per_1k_bytes": 1,
+      "extract_units": 1,
+      "selector_units": 2,
+      "transform_units": 1,
+      "artifact_units_per_k": 1,
+      "currency": "USD",
+      "rate": 1e-05
+    },
+    "jobs": {
+      "max_jobs": 5000,
+      "ttl_secs": 604800,
+      "enabled": true,
+      "workers": 2,
+      "max_browser_ms": 30000,
+      "max_records": 5000,
+      "max_interval_minutes": 1440,
+      "jobs_max_list": 200
+    },
+    "webhook": {
+      "max_attempts": 5,
+      "timeout_ms": 10000,
+      "retry_base_ms": 1000,
+      "retry_cap_ms": 30000,
+      "dead_letter_path": "state/managed-api/dead-letter.jsonl",
+      "enabled": false,
+      "allowed_hosts": [],
+      "retry_schedule_ms": [],
+      "delivery_key": "dev-only-delivery-key",
+      "dead_letter_salt": "dev-only-dead-letter-salt",
+      "list_max": 500
+    }
+  },
+  "_managed_api_note": "Disabled by default: `enabled: false` means no /v1/* route is mounted and no key store is opened. Every bound here is a hard constant with a ceiling in src/config.rs; the values shown are the built-in defaults, so the block documents the schema rather than changing behaviour. `default_limits.scopes` uses the closed vocabulary `scrape`, `jobs_read`, `jobs_write`, `usage_read`, `keys_admin`. `webhook.delivery_key` is dev-only \u2014 generate a real one per deployment, and note `webhook.enabled` is off unless an operator opts in."
 }

@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { Button, Field, SelectInput, TextInput } from "../../../components/ui";
+import { Button, Field, SelectInput, TextInput } from "../../components/ui";
 
 export type ExtractionKind = "text" | "element" | "attribute" | "link" | "image" | "html" | "repeated_record";
 export interface SelectorField {

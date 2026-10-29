@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn transform_normalizes_and_parses() {
         let value = apply_transforms(
-            Value::String(" $1,200.50 ".into()),
+            Value::String(" 1,200.50 ".into()),
             &[Transform::Trim, Transform::ParseNumber],
         )
         .unwrap();

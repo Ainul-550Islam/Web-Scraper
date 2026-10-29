@@ -9,7 +9,7 @@
  * binary), BUYER_DEMO_PORT (8099), SMOKE_PORT (4321, shared with smoke.mjs).
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -65,6 +65,35 @@ const outJsonl = join(ROOT, "out", "basic.jsonl");
 if (existsSync(outJsonl)) rmSync(outJsonl);
 const outDir = mkdtempSync(join(tmpdir(), "harvest-buyer-"));
 
+// The console's API Keys and Usage pages read the managed surface, so the
+// engine this harness drives needs `managed_api` enabled. The shipped example
+// stays untouched: derive a temp config that adds the block.
+const ENGINE_CFG = join(outDir, "buyer-config.json");
+{
+  const mcfg = JSON.parse(readFileSync(join(ROOT, CONFIG), "utf8"));
+  mcfg.managed_api = {
+    enabled: true,
+    data_dir: join(outDir, "managed"),
+    ledger_dir: join(outDir, "managed/ledger"),
+    export_dir: join(outDir, "managed/exports"),
+    allow_private_targets: true,
+    webhook: {
+      enabled: true,
+      allowed_hosts: ["127.0.0.1"],
+      delivery_key: "buyer-delivery-key",
+      dead_letter_salt: "buyer-dead-letter-salt",
+      dead_letter_path: join(outDir, "managed/dead-letter.jsonl"),
+      max_attempts: 2,
+      timeout_ms: 5000,
+      retry_base_ms: 100,
+      retry_cap_ms: 1000,
+      retry_schedule_ms: [],
+      list_max: 500,
+    },
+  };
+  writeFileSync(ENGINE_CFG, JSON.stringify(mcfg, null, 2));
+}
+
 if (!existsSync(join(WEB, "dist/index.html"))) {
   console.error("buyer e2e: web/dist missing — run `npm run build` in web/ first");
   process.exit(2);
@@ -80,7 +109,7 @@ try {
   });
   ok("demo mock site serving on :" + DEMO_PORT, true);
 
-  const engine = spawn(BIN[0], [...BIN.slice(1), "serve", "--config", CONFIG], { cwd: ROOT, stdio: "ignore", detached: true });
+  const engine = spawn(BIN[0], [...BIN.slice(1), "serve", "--config", ENGINE_CFG], { cwd: ROOT, stdio: "ignore", detached: true });
   kids.push(engine);
   await waitHttp(`${API}/health`);
   ok("engine admin API up (`serve` mode)", true);
@@ -142,7 +171,50 @@ try {
     ok("manifest reports record totals matching the delivery", typeof man === "object" && JSON.stringify(man).includes("sha256"));
   }
 
-  // ── 5. graceful shutdown is what serve promises
+  // ── 5. the console's managed pages: API Keys and Usage
+  const tRes = await run([...BIN, "keys", "tenant", "--config", ENGINE_CFG, "--name", "buyer-console"]);
+  ok("CLI creates a tenant for the console pages", tRes.code === 0 && /"id":"t-[^"]+"/.test(tRes.out), tRes.out.slice(-120));
+  // `keys create --tenant <name>` registers the name as the tenant id itself,
+  // so the key and the listing below refer to the same tenant.
+  const tenantId = "buyer";
+  const kRes = await run([...BIN, "keys", "create", "--config", ENGINE_CFG, "--tenant", tenantId,
+    "--name", "buyer-key", "--scope", "scrape,jobs_read,jobs_write,usage_read"]);
+  const keyPlain = (kRes.out.match(/"plaintext":"([^"]+)"/) || [])[1];
+  ok("CLI creates an api key for the console pages", kRes.code === 0 && !!keyPlain, kRes.out.slice(-120));
+
+  // Both pages are client-rendered: through the preview proxy they must serve
+  // the SPA shell, and the endpoints they call must answer.
+  for (const route of ["/api-keys", "/usage"]) {
+    const r = await get(route);
+    const html = await r.text().catch(() => "");
+    ok(`console route ${route} serves the SPA shell`, r.ok && /<script[^>]+type="module"/.test(html), String(r.status));
+  }
+  const rKeys = await get(`/api/v1/admin/keys?tenant_id=${encodeURIComponent(tenantId ?? "")}`);
+  const keys = await rKeys.json().catch(() => null);
+  ok("GET /api/v1/admin/keys returns the tenant's keys",
+    rKeys.status === 200 && Array.isArray(keys?.keys) && keys.keys.length === 1 && !("api_key" in (keys.keys[0] ?? {})),
+    `${rKeys.status} ${JSON.stringify(keys)?.slice(0, 80)}`);
+  const rUsage = await get("/api/v1/admin/usage");
+  const usage = await rUsage.json().catch(() => null);
+  ok("GET /api/v1/admin/usage returns a usage report",
+    rUsage.status === 200 && !!usage?.totals && Array.isArray(usage?.by_key) && Array.isArray(usage?.by_day),
+    `${rUsage.status} ${JSON.stringify(usage)?.slice(0, 80)}`);
+  // A customer-side read with the key the console just handed out.
+  const rScrape = await fetch(`${API}/v1/scrape`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${keyPlain}` },
+    body: JSON.stringify({ url: `http://127.0.0.1:${DEMO_PORT}/index.html`, format: "text" }),
+  });
+  const scrape = await rScrape.json().catch(() => null);
+  ok("POST /v1/scrape with the created key returns data + units",
+    rScrape.status === 200 && Number(scrape?.usage_units ?? 0) >= 1,
+    `${rScrape.status} ${JSON.stringify(scrape)?.slice(0, 80)}`);
+  const rUsage2 = await get("/api/v1/admin/usage");
+  const usage2 = await rUsage2.json().catch(() => null);
+  ok("the metered call shows up in the usage report",
+    Number(usage2?.totals?.requests ?? 0) >= 1, JSON.stringify(usage2?.totals)?.slice(0, 80));
+
+  // ── 6. graceful shutdown is what serve promises
   process.kill(-engine.pid, "SIGINT");
   const t1 = Date.now();
   let exited = false;

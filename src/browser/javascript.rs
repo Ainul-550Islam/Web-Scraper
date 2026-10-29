@@ -36,6 +36,7 @@ pub async fn evaluate(
 mod tests {
     use super::*;
     #[test]
+    #[allow(non_snake_case)]
     fn javaScript_requires_explicit_opt_in() {
         let cfg = BrowserConfig::default();
         assert!(!cfg.allow_javascript);

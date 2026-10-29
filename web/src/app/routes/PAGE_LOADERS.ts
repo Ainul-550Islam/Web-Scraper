@@ -26,6 +26,8 @@ export const PAGE_LOADERS: Readonly<Record<string, LazyExoticComponent<Component
   "/diagnostics": lazy(() => import("../../features/diagnostics/Diagnostics")),
   "/config": lazy(() => import("../../features/config/ConfigStudio")),
   "/api": lazy(() => import("../../features/api/ApiExplorer")),
+  "/api-keys": lazy(() => import("../../features/managed/keys/ApiKeys")),
+  "/usage": lazy(() => import("../../features/managed/usage/Usage")),
   "/export": lazy(() => import("../../pages/ExportCenter")),
   "/crawl": lazy(() => import("../../pages/CrawlStudio")),
   "/browser-studio": lazy(() => import("../../features/browser-studio/BrowserStudio")),

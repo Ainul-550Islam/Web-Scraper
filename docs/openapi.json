@@ -1,0 +1,3738 @@
+{
+  "components": {
+    "schemas": {
+      "ArtifactRef": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "html",
+              "screenshot",
+              "json"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "ChainHead": {
+        "additionalProperties": false,
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "seq": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "hash"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "schema": {
+            "description": "Response schema version.",
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema",
+          "error"
+        ],
+        "type": "object"
+      },
+      "JobResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "bytes": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "html",
+                    "screenshot",
+                    "json"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "bytes"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "attempts": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "chain": {
+            "additionalProperties": false,
+            "properties": {
+              "hash": {
+                "type": "string"
+              },
+              "seq": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seq",
+              "hash"
+            ],
+            "type": "object"
+          },
+          "created_at_ms": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "finished_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "records": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "schema": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          },
+          "scrape": {
+            "allOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "artifacts": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "bytes": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "html",
+                            "screenshot",
+                            "json"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "kind",
+                        "bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "body": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bytes": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "chain": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "hash": {
+                        "type": "string"
+                      },
+                      "seq": {
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "seq",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "content_type": {
+                    "type": "string"
+                  },
+                  "cost": {
+                    "type": "string"
+                  },
+                  "extracted": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "final_url": {
+                    "format": "uri",
+                    "type": "string"
+                  },
+                  "format": {
+                    "enum": [
+                      "html",
+                      "text",
+                      "markdown",
+                      "json",
+                      "screenshot"
+                    ],
+                    "type": "string"
+                  },
+                  "latency_ms": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "records": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "render": {
+                    "enum": [
+                      "none",
+                      "browser"
+                    ],
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "schema": {
+                    "enum": [
+                      1
+                    ],
+                    "type": "integer"
+                  },
+                  "screenshot": {
+                    "allOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bytes": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "html",
+                              "screenshot",
+                              "json"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "kind",
+                          "bytes"
+                        ],
+                        "type": "object"
+                      }
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "type": "integer"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "type": "string"
+                  },
+                  "usage_units": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "request_id",
+                  "status",
+                  "url",
+                  "final_url",
+                  "content_type",
+                  "bytes",
+                  "latency_ms",
+                  "render",
+                  "format",
+                  "usage_units",
+                  "cost",
+                  "chain"
+                ],
+                "type": "object"
+              }
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "started_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema",
+          "job_id",
+          "status",
+          "url",
+          "request_id",
+          "created_at_ms",
+          "attempts",
+          "cancelled",
+          "chain"
+        ],
+        "type": "object"
+      },
+      "ScrapeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "extract": {
+            "additionalProperties": false,
+            "properties": {
+              "fields": {
+                "additionalProperties": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "all": {
+                      "type": "boolean"
+                    },
+                    "attr": {
+                      "type": "string"
+                    },
+                    "css": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "transforms": {
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              "max_records": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "selector": {
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "format": {
+            "default": "html",
+            "enum": [
+              "html",
+              "text",
+              "markdown",
+              "json",
+              "screenshot"
+            ],
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "proxy_region": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "render": {
+            "default": "none",
+            "enum": [
+              "none",
+              "browser"
+            ],
+            "type": "string"
+          },
+          "screenshot": {
+            "default": false,
+            "type": "boolean"
+          },
+          "session_key": {
+            "description": "Stable browser-session key so a repeat call resumes instead of restarting.",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "url": {
+            "description": "Absolute http(s) URL. SSRF-checked before anything else; loopback, private, link-local, multicast and unspecified targets are rejected, and every redirect hop is re-checked.",
+            "format": "uri",
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "wait": {
+            "additionalProperties": false,
+            "properties": {
+              "ms": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "settle_ms": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "until_selector": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "webhook_url": {
+            "description": "Public https callback. Deliveries are HMAC-SHA256 signed and retried, then dead-lettered.",
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "ScrapeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "bytes": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "html",
+                    "screenshot",
+                    "json"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "bytes"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chain": {
+            "additionalProperties": false,
+            "properties": {
+              "hash": {
+                "type": "string"
+              },
+              "seq": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seq",
+              "hash"
+            ],
+            "type": "object"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "cost": {
+            "type": "string"
+          },
+          "extracted": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "final_url": {
+            "format": "uri",
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "html",
+              "text",
+              "markdown",
+              "json",
+              "screenshot"
+            ],
+            "type": "string"
+          },
+          "latency_ms": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records": {
+            "items": {
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "render": {
+            "enum": [
+              "none",
+              "browser"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "schema": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          },
+          "screenshot": {
+            "allOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "bytes": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "html",
+                      "screenshot",
+                      "json"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "bytes"
+                ],
+                "type": "object"
+              }
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "integer"
+          },
+          "url": {
+            "format": "uri",
+            "type": "string"
+          },
+          "usage_units": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema",
+          "request_id",
+          "status",
+          "url",
+          "final_url",
+          "content_type",
+          "bytes",
+          "latency_ms",
+          "render",
+          "format",
+          "usage_units",
+          "cost",
+          "chain"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "description": "A tenant api key, prefixed `hv1_`. Keys are stored only as SHA-256 hashes and are shown once at creation.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Customer-facing scrape API. Every endpoint requires a tenant api key; requests are SSRF-guarded, compliance-checked and metered through an append-only hash-chained ledger. Request bodies are bounded by the operator's configured limit.",
+    "title": "Harvest managed scrape API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/jobs": {
+      "get": {
+        "operationId": "listJobs",
+        "parameters": [
+          {
+            "description": "Maximum jobs to return.",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "jobs": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "artifacts": {
+                            "items": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "bytes": {
+                                  "minimum": 0,
+                                  "type": "integer"
+                                },
+                                "id": {
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "enum": [
+                                    "html",
+                                    "screenshot",
+                                    "json"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "id",
+                                "kind",
+                                "bytes"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "attempts": {
+                            "maximum": 255,
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "cancelled": {
+                            "type": "boolean"
+                          },
+                          "chain": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "hash": {
+                                "type": "string"
+                              },
+                              "seq": {
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "seq",
+                              "hash"
+                            ],
+                            "type": "object"
+                          },
+                          "created_at_ms": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "error": {
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          },
+                          "finished_at_ms": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "job_id": {
+                            "type": "string"
+                          },
+                          "records": {
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "request_id": {
+                            "type": "string"
+                          },
+                          "schema": {
+                            "enum": [
+                              1
+                            ],
+                            "type": "integer"
+                          },
+                          "scrape": {
+                            "allOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "artifacts": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "bytes": {
+                                          "minimum": 0,
+                                          "type": "integer"
+                                        },
+                                        "id": {
+                                          "type": "string"
+                                        },
+                                        "kind": {
+                                          "enum": [
+                                            "html",
+                                            "screenshot",
+                                            "json"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "id",
+                                        "kind",
+                                        "bytes"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "body": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "bytes": {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "chain": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "hash": {
+                                        "type": "string"
+                                      },
+                                      "seq": {
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "seq",
+                                      "hash"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "content_type": {
+                                    "type": "string"
+                                  },
+                                  "cost": {
+                                    "type": "string"
+                                  },
+                                  "extracted": {
+                                    "type": [
+                                      "object",
+                                      "null"
+                                    ]
+                                  },
+                                  "final_url": {
+                                    "format": "uri",
+                                    "type": "string"
+                                  },
+                                  "format": {
+                                    "enum": [
+                                      "html",
+                                      "text",
+                                      "markdown",
+                                      "json",
+                                      "screenshot"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "latency_ms": {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "records": {
+                                    "items": {
+                                      "type": "object"
+                                    },
+                                    "type": [
+                                      "array",
+                                      "null"
+                                    ]
+                                  },
+                                  "render": {
+                                    "enum": [
+                                      "none",
+                                      "browser"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "request_id": {
+                                    "type": "string"
+                                  },
+                                  "schema": {
+                                    "enum": [
+                                      1
+                                    ],
+                                    "type": "integer"
+                                  },
+                                  "screenshot": {
+                                    "allOf": [
+                                      {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "bytes": {
+                                            "minimum": 0,
+                                            "type": "integer"
+                                          },
+                                          "id": {
+                                            "type": "string"
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "html",
+                                              "screenshot",
+                                              "json"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "id",
+                                          "kind",
+                                          "bytes"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    ],
+                                    "type": [
+                                      "object",
+                                      "null"
+                                    ]
+                                  },
+                                  "status": {
+                                    "type": "integer"
+                                  },
+                                  "url": {
+                                    "format": "uri",
+                                    "type": "string"
+                                  },
+                                  "usage_units": {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "schema",
+                                  "request_id",
+                                  "status",
+                                  "url",
+                                  "final_url",
+                                  "content_type",
+                                  "bytes",
+                                  "latency_ms",
+                                  "render",
+                                  "format",
+                                  "usage_units",
+                                  "cost",
+                                  "chain"
+                                ],
+                                "type": "object"
+                              }
+                            ],
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          },
+                          "started_at_ms": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "status": {
+                            "enum": [
+                              "queued",
+                              "running",
+                              "done",
+                              "failed",
+                              "cancelled"
+                            ],
+                            "type": "string"
+                          },
+                          "url": {
+                            "format": "uri",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "job_id",
+                          "status",
+                          "url",
+                          "request_id",
+                          "created_at_ms",
+                          "attempts",
+                          "cancelled",
+                          "chain"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "jobs"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Jobs for this tenant."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "missing or invalid api key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the api key does not have the required scope"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "List this tenant's jobs."
+      },
+      "post": {
+        "operationId": "createJob",
+        "parameters": [
+          {
+            "description": "Within the retention window, a repeat of this key returns the stored response instead of re-running (and re-charging) the request.",
+            "in": "header",
+            "name": "idempotency-key",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "extract": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "fields": {
+                        "additionalProperties": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "all": {
+                              "type": "boolean"
+                            },
+                            "attr": {
+                              "type": "string"
+                            },
+                            "css": {
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            },
+                            "transforms": {
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "object"
+                      },
+                      "max_records": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "selector": {
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "format": {
+                    "default": "html",
+                    "enum": [
+                      "html",
+                      "text",
+                      "markdown",
+                      "json",
+                      "screenshot"
+                    ],
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 128,
+                    "type": "string"
+                  },
+                  "proxy_region": {
+                    "maxLength": 64,
+                    "type": "string"
+                  },
+                  "render": {
+                    "default": "none",
+                    "enum": [
+                      "none",
+                      "browser"
+                    ],
+                    "type": "string"
+                  },
+                  "screenshot": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "session_key": {
+                    "description": "Stable browser-session key so a repeat call resumes instead of restarting.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "Absolute http(s) URL. SSRF-checked before anything else; loopback, private, link-local, multicast and unspecified targets are rejected, and every redirect hop is re-checked.",
+                    "format": "uri",
+                    "maxLength": 2048,
+                    "type": "string"
+                  },
+                  "wait": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "ms": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "settle_ms": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "until_selector": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "webhook_url": {
+                    "description": "Public https callback. Deliveries are HMAC-SHA256 signed and retried, then dead-lettered.",
+                    "format": "uri",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "chain": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "hash": {
+                          "type": "string"
+                        },
+                        "seq": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "seq",
+                        "hash"
+                      ],
+                      "type": "object"
+                    },
+                    "estimated_units": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "idempotency_replayed": {
+                      "type": "boolean"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    },
+                    "status": {
+                      "enum": [
+                        "queued"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "job_id",
+                    "status",
+                    "estimated_units",
+                    "idempotency_replayed",
+                    "chain"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The job was queued."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the request was rejected"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "missing or invalid api key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the api key does not have the required scope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the key exists but is suspended, expired or revoked"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "a limit was exhausted"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Schedule a scrape job."
+      }
+    },
+    "/v1/jobs/{job_id}": {
+      "get": {
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artifacts": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bytes": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "html",
+                              "screenshot",
+                              "json"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "kind",
+                          "bytes"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "attempts": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "chain": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "hash": {
+                          "type": "string"
+                        },
+                        "seq": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "seq",
+                        "hash"
+                      ],
+                      "type": "object"
+                    },
+                    "created_at_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "finished_at_ms": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "records": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    },
+                    "scrape": {
+                      "allOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "artifacts": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "bytes": {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "kind": {
+                                    "enum": [
+                                      "html",
+                                      "screenshot",
+                                      "json"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "kind",
+                                  "bytes"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "body": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bytes": {
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "chain": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "hash": {
+                                  "type": "string"
+                                },
+                                "seq": {
+                                  "minimum": 0,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [
+                                "seq",
+                                "hash"
+                              ],
+                              "type": "object"
+                            },
+                            "content_type": {
+                              "type": "string"
+                            },
+                            "cost": {
+                              "type": "string"
+                            },
+                            "extracted": {
+                              "type": [
+                                "object",
+                                "null"
+                              ]
+                            },
+                            "final_url": {
+                              "format": "uri",
+                              "type": "string"
+                            },
+                            "format": {
+                              "enum": [
+                                "html",
+                                "text",
+                                "markdown",
+                                "json",
+                                "screenshot"
+                              ],
+                              "type": "string"
+                            },
+                            "latency_ms": {
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "records": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": [
+                                "array",
+                                "null"
+                              ]
+                            },
+                            "render": {
+                              "enum": [
+                                "none",
+                                "browser"
+                              ],
+                              "type": "string"
+                            },
+                            "request_id": {
+                              "type": "string"
+                            },
+                            "schema": {
+                              "enum": [
+                                1
+                              ],
+                              "type": "integer"
+                            },
+                            "screenshot": {
+                              "allOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "bytes": {
+                                      "minimum": 0,
+                                      "type": "integer"
+                                    },
+                                    "id": {
+                                      "type": "string"
+                                    },
+                                    "kind": {
+                                      "enum": [
+                                        "html",
+                                        "screenshot",
+                                        "json"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "id",
+                                    "kind",
+                                    "bytes"
+                                  ],
+                                  "type": "object"
+                                }
+                              ],
+                              "type": [
+                                "object",
+                                "null"
+                              ]
+                            },
+                            "status": {
+                              "type": "integer"
+                            },
+                            "url": {
+                              "format": "uri",
+                              "type": "string"
+                            },
+                            "usage_units": {
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "request_id",
+                            "status",
+                            "url",
+                            "final_url",
+                            "content_type",
+                            "bytes",
+                            "latency_ms",
+                            "render",
+                            "format",
+                            "usage_units",
+                            "cost",
+                            "chain"
+                          ],
+                          "type": "object"
+                        }
+                      ],
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "started_at_ms": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "queued",
+                        "running",
+                        "done",
+                        "failed",
+                        "cancelled"
+                      ],
+                      "type": "string"
+                    },
+                    "url": {
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "job_id",
+                    "status",
+                    "url",
+                    "request_id",
+                    "created_at_ms",
+                    "attempts",
+                    "cancelled",
+                    "chain"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The job, or its terminal result once it has run."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "missing or invalid api key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the api key does not have the required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "no job with this id, or it belongs to another tenant"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Read one job."
+      }
+    },
+    "/v1/jobs/{job_id}/cancel": {
+      "post": {
+        "operationId": "cancelJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artifacts": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bytes": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "html",
+                              "screenshot",
+                              "json"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "kind",
+                          "bytes"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "attempts": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "chain": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "hash": {
+                          "type": "string"
+                        },
+                        "seq": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "seq",
+                        "hash"
+                      ],
+                      "type": "object"
+                    },
+                    "created_at_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "finished_at_ms": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "records": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    },
+                    "scrape": {
+                      "allOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "artifacts": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "bytes": {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "kind": {
+                                    "enum": [
+                                      "html",
+                                      "screenshot",
+                                      "json"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "kind",
+                                  "bytes"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "body": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bytes": {
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "chain": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "hash": {
+                                  "type": "string"
+                                },
+                                "seq": {
+                                  "minimum": 0,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [
+                                "seq",
+                                "hash"
+                              ],
+                              "type": "object"
+                            },
+                            "content_type": {
+                              "type": "string"
+                            },
+                            "cost": {
+                              "type": "string"
+                            },
+                            "extracted": {
+                              "type": [
+                                "object",
+                                "null"
+                              ]
+                            },
+                            "final_url": {
+                              "format": "uri",
+                              "type": "string"
+                            },
+                            "format": {
+                              "enum": [
+                                "html",
+                                "text",
+                                "markdown",
+                                "json",
+                                "screenshot"
+                              ],
+                              "type": "string"
+                            },
+                            "latency_ms": {
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "records": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": [
+                                "array",
+                                "null"
+                              ]
+                            },
+                            "render": {
+                              "enum": [
+                                "none",
+                                "browser"
+                              ],
+                              "type": "string"
+                            },
+                            "request_id": {
+                              "type": "string"
+                            },
+                            "schema": {
+                              "enum": [
+                                1
+                              ],
+                              "type": "integer"
+                            },
+                            "screenshot": {
+                              "allOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "bytes": {
+                                      "minimum": 0,
+                                      "type": "integer"
+                                    },
+                                    "id": {
+                                      "type": "string"
+                                    },
+                                    "kind": {
+                                      "enum": [
+                                        "html",
+                                        "screenshot",
+                                        "json"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "id",
+                                    "kind",
+                                    "bytes"
+                                  ],
+                                  "type": "object"
+                                }
+                              ],
+                              "type": [
+                                "object",
+                                "null"
+                              ]
+                            },
+                            "status": {
+                              "type": "integer"
+                            },
+                            "url": {
+                              "format": "uri",
+                              "type": "string"
+                            },
+                            "usage_units": {
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "request_id",
+                            "status",
+                            "url",
+                            "final_url",
+                            "content_type",
+                            "bytes",
+                            "latency_ms",
+                            "render",
+                            "format",
+                            "usage_units",
+                            "cost",
+                            "chain"
+                          ],
+                          "type": "object"
+                        }
+                      ],
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "started_at_ms": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "queued",
+                        "running",
+                        "done",
+                        "failed",
+                        "cancelled"
+                      ],
+                      "type": "string"
+                    },
+                    "url": {
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "job_id",
+                    "status",
+                    "url",
+                    "request_id",
+                    "created_at_ms",
+                    "attempts",
+                    "cancelled",
+                    "chain"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Cancellation was requested."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "no job with this id, or it belongs to another tenant"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Cancel a queued or running job."
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "description": "Generated from the route table, so the served contract and the checked-in copy cannot drift.",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The OpenAPI document."
+          }
+        },
+        "summary": "This document."
+      }
+    },
+    "/v1/scrape": {
+      "post": {
+        "description": "Runs the full compliance path (robots.txt, per-domain pacing, circuit breakers, refusal handling) and returns the body, extracted fields or records.",
+        "operationId": "scrape",
+        "parameters": [
+          {
+            "description": "Within the retention window, a repeat of this key returns the stored response instead of re-running (and re-charging) the request.",
+            "in": "header",
+            "name": "idempotency-key",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "extract": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "fields": {
+                        "additionalProperties": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "all": {
+                              "type": "boolean"
+                            },
+                            "attr": {
+                              "type": "string"
+                            },
+                            "css": {
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            },
+                            "transforms": {
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "object"
+                      },
+                      "max_records": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "selector": {
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "format": {
+                    "default": "html",
+                    "enum": [
+                      "html",
+                      "text",
+                      "markdown",
+                      "json",
+                      "screenshot"
+                    ],
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 128,
+                    "type": "string"
+                  },
+                  "proxy_region": {
+                    "maxLength": 64,
+                    "type": "string"
+                  },
+                  "render": {
+                    "default": "none",
+                    "enum": [
+                      "none",
+                      "browser"
+                    ],
+                    "type": "string"
+                  },
+                  "screenshot": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "session_key": {
+                    "description": "Stable browser-session key so a repeat call resumes instead of restarting.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "Absolute http(s) URL. SSRF-checked before anything else; loopback, private, link-local, multicast and unspecified targets are rejected, and every redirect hop is re-checked.",
+                    "format": "uri",
+                    "maxLength": 2048,
+                    "type": "string"
+                  },
+                  "wait": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "ms": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "settle_ms": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "until_selector": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "webhook_url": {
+                    "description": "Public https callback. Deliveries are HMAC-SHA256 signed and retried, then dead-lettered.",
+                    "format": "uri",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artifacts": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bytes": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "html",
+                              "screenshot",
+                              "json"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "kind",
+                          "bytes"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "body": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "bytes": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "chain": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "hash": {
+                          "type": "string"
+                        },
+                        "seq": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "seq",
+                        "hash"
+                      ],
+                      "type": "object"
+                    },
+                    "content_type": {
+                      "type": "string"
+                    },
+                    "cost": {
+                      "type": "string"
+                    },
+                    "extracted": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "final_url": {
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "format": {
+                      "enum": [
+                        "html",
+                        "text",
+                        "markdown",
+                        "json",
+                        "screenshot"
+                      ],
+                      "type": "string"
+                    },
+                    "latency_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": [
+                        "array",
+                        "null"
+                      ]
+                    },
+                    "render": {
+                      "enum": [
+                        "none",
+                        "browser"
+                      ],
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    },
+                    "screenshot": {
+                      "allOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "bytes": {
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "kind": {
+                              "enum": [
+                                "html",
+                                "screenshot",
+                                "json"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "kind",
+                            "bytes"
+                          ],
+                          "type": "object"
+                        }
+                      ],
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "type": "integer"
+                    },
+                    "url": {
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "usage_units": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "request_id",
+                    "status",
+                    "url",
+                    "final_url",
+                    "content_type",
+                    "bytes",
+                    "latency_ms",
+                    "render",
+                    "format",
+                    "usage_units",
+                    "cost",
+                    "chain"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The retrieval succeeded."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "missing or invalid api key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the api key does not have the required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "no api key exists with this value"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the key exists but is suspended, expired or revoked"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rate limit, concurrency cap or monthly quota exhausted."
+          },
+          "4xx": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the request was rejected"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Scrape one URL and return the response."
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "description": "Returns per-key rows, a per-day series and the totals for the requested window.",
+        "operationId": "getUsage",
+        "parameters": [
+          {
+            "description": "Restrict to one api key.",
+            "in": "query",
+            "name": "key_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive lower bound, epoch milliseconds.",
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Inclusive upper bound, epoch milliseconds.",
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "by_day": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "by_key": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "generated_at_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "key_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "schema": {
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    },
+                    "since_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "totals": {
+                      "type": "object"
+                    },
+                    "until_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "since_ms",
+                    "until_ms",
+                    "totals",
+                    "by_key",
+                    "by_day",
+                    "key_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The usage report."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "missing or invalid api key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the api key does not have the required scope"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "retry_after_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "description": "Response schema version.",
+                      "enum": [
+                        1
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "an internal error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Read the usage ledger for this tenant."
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Same origin as the console; the api base path is `/v1`.",
+      "url": "/"
+    }
+  ],
+  "x-harvest-config": {
+    "jobs": {
+      "enabled": true,
+      "jobs_max_list": 200,
+      "max_jobs": 5000,
+      "ttl_secs": 604800
+    },
+    "max_records": 5000,
+    "max_redirects": 5,
+    "max_request_bytes": 65536,
+    "max_url_len": 2048,
+    "pricing": {
+      "base_units": 1,
+      "currency": "USD",
+      "rate": 0.00001
+    },
+    "request_timeout_ms": 60000,
+    "webhook": {
+      "allowed_hosts": [],
+      "enabled": false,
+      "max_attempts": 5,
+      "timeout_ms": 10000
+    }
+  }
+}

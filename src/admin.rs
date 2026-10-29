@@ -114,6 +114,10 @@ pub struct AdminState {
     artifacts: Mutex<Arc<ArtifactStore>>,
     /// Admin-server start; powers the diagnostics uptime line.
     started: Instant,
+    /// The managed customer API (`/v1/*`). Attached only when the config
+    /// has it enabled: without it the customer routes answer 503 rather
+    /// than falling through to the console router.
+    managed_app: Mutex<Option<Arc<crate::scrape_api::App>>>,
 }
 
 impl AdminState {
@@ -141,8 +145,24 @@ impl AdminState {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ))),
             started: Instant::now(),
+            managed_app: Mutex::new(None),
         }
     }
+    /// Attach the managed customer API. Built from the same config the
+    /// console already holds, so the two surfaces agree on limits, pricing
+    /// and the usage ledger.
+    pub fn attach_managed_api(&self, app: Arc<crate::scrape_api::App>) {
+        *self.managed_app.lock().unwrap_or_else(|p| p.into_inner()) = Some(app);
+    }
+
+    /// The managed customer API, when one was attached.
+    pub fn managed_app(&self) -> Option<Arc<crate::scrape_api::App>> {
+        self.managed_app
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// Wire the shared runtime slot (used by `run`/`serve` so the engine can
     /// publish its live snapshot through this server without owning it).
     pub fn attach_runtime(&self, slot: RuntimeSlot) {
@@ -166,7 +186,29 @@ impl AdminState {
     pub fn with_config(&self, cfg: Arc<Config>, path: Option<PathBuf>) {
         *self.cfg.lock().unwrap_or_else(|p| p.into_inner()) = Some(cfg.clone());
         *self.cfg_path.lock().unwrap_or_else(|p| p.into_inner()) = path;
-        self.attach_control_plane(cfg);
+        self.attach_control_plane(cfg.clone());
+        self.attach_managed_api_from_config(cfg);
+    }
+
+    /// Build and attach the managed customer API when the config enables it.
+    /// A failure to build it disables the surface loudly (one warning, and
+    /// `/v1/*` answers 503) instead of taking the console down with it.
+    fn attach_managed_api_from_config(&self, cfg: Arc<Config>) {
+        let managed = cfg.managed_api.clone();
+        if !managed.enabled {
+            return;
+        }
+        let inputs = match crate::scrape_api::AppInputs::from_config(cfg, managed, self.metrics()) {
+            Ok(inputs) => inputs,
+            Err(e) => {
+                tracing::warn!(err = %e, "managed api unavailable: cannot open its state");
+                return;
+            }
+        };
+        match crate::scrape_api::App::new(inputs) {
+            Ok(app) => self.attach_managed_api(Arc::new(app)),
+            Err(e) => tracing::warn!(err = %e, "managed api unavailable: cannot start it"),
+        }
     }
 
     /// Build (or rebuild) the control plane for an effective configuration.
@@ -287,7 +329,9 @@ fn err_api(e: ApiError, corr: &CorrelationId) -> ApiResponse {
 fn status_line(status: u16) -> &'static str {
     match status {
         200 => "200 OK",
+        201 => "201 Created",
         202 => "202 Accepted",
+        204 => "204 No Content",
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
         403 => "403 Forbidden",
@@ -295,7 +339,9 @@ fn status_line(status: u16) -> &'static str {
         405 => "405 Method Not Allowed",
         409 => "409 Conflict",
         413 => "413 Payload Too Large",
+        429 => "429 Too Many Requests",
         500 => "500 Internal Server Error",
+        503 => "503 Service Unavailable",
         _ => "503 Service Unavailable",
     }
 }
@@ -416,7 +462,12 @@ where
     // (no config, no counts, no paths), which is exactly what a container
     // orchestrator needs and safe to expose on an otherwise token-gated port.
     let open = route == "/health" || route == "/live";
-    if !open {
+    // `/v1/*` is the managed surface: the customer routes authenticate with
+    // a tenant api key inside their own handlers, while `/v1/admin/*` is the
+    // operator half and keeps the console bearer.
+    let is_customer_route =
+        managed_route(&method, route_shape(route)) && !route.starts_with("/v1/admin/");
+    if !open && !is_customer_route {
         if let Some(want) = &state.token {
             if !bearer_ok(&head, want) {
                 // Constant body: never echo the path, the presented header,
@@ -431,7 +482,11 @@ where
     // Token-less mode is local CLI/browser development, not an open proxy.
     // A browser can rebind an attacker-controlled hostname to loopback; CORS
     // alone does not stop same-origin reads in that case.
-    if !open && state.token.is_none() && !loopback_host(header_value(&head, "host")) {
+    if !open
+        && !is_customer_route
+        && state.token.is_none()
+        && !loopback_host(header_value(&head, "host"))
+    {
         let r = err_api(
             ApiError::forbidden("token-less admin requests require a loopback Host"),
             &corr,
@@ -527,6 +582,12 @@ where
                 return respond(sock, state, r, &corr, &method, route_key, t0).await;
             }
         }
+        _ if route.starts_with("/v1/") => {
+            // `/v1/*` answers with its own envelope, so an unknown customer
+            // route must reach the managed dispatch rather than the console's
+            // method table. There is no body to read for these: the shape
+            // did not match a known route, so the managed handler reports it.
+        }
         _ => {
             let r = err_api(ApiError::method_not_allowed(&method, route_key), &corr);
             return respond(sock, state, r, &corr, &method, route_key, t0).await;
@@ -559,6 +620,29 @@ where
         .await;
     }
 
+    // The customer surface is dispatched with its own authority: it reads the
+    // raw path (parameter segments are meaningful there) and answers with the
+    // managed response envelope rather than the console's.
+    if route.starts_with("/v1/") {
+        if let Some((status, ctype, body, extra)) =
+            dispatch_managed(state, &head, &method, &route_raw, &qs, &body).await
+        {
+            return respond_bytes(
+                sock,
+                state,
+                status,
+                ctype,
+                body.as_bytes(),
+                &extra,
+                &corr,
+                &method,
+                route_key,
+                t0,
+            )
+            .await;
+        }
+    }
+
     let resp = dispatch(
         state,
         &method,
@@ -580,6 +664,27 @@ fn route_shape(route: &str) -> &str {
             return "/control/jobs/:id/cancel";
         }
         return "/control/jobs/:id";
+    }
+    if let Some(rest) = route.strip_prefix("/v1/admin/keys/") {
+        // `/v1/admin/keys/<id>/<action>` — the id is opaque to the router.
+        if let Some((id, action)) = rest.split_once('/') {
+            if !id.is_empty() && !action.is_empty() {
+                return match action {
+                    "rotate" => "/v1/admin/keys/:id/rotate",
+                    "revoke" => "/v1/admin/keys/:id/revoke",
+                    "suspend" => "/v1/admin/keys/:id/suspend",
+                    _ => route,
+                };
+            }
+        }
+    }
+    if let Some(rest) = route.strip_prefix("/v1/jobs/") {
+        if rest.ends_with("/cancel") {
+            return "/v1/jobs/:id/cancel";
+        }
+        if !rest.is_empty() {
+            return "/v1/jobs/:id";
+        }
     }
     if let Some(rest) = route.strip_prefix("/control/artifacts/") {
         if !rest.is_empty() {
@@ -650,6 +755,9 @@ fn control_body_limit(route_key: &str) -> Option<u64> {
     match route_key {
         "/control/crawl" | "/control/export" | "/control/ai" => Some(COMMAND_BODY_LIMIT),
         "/control/jobs/:id/cancel" => Some(COMMAND_BODY_LIMIT),
+        "/v1/scrape" | "/v1/jobs" | "/v1/jobs/:id/cancel" => {
+            Some(crate::config::ManagedApiCfg::default().max_request_bytes)
+        }
         _ => None,
     }
 }
@@ -741,6 +849,87 @@ where
     sock.write_all(hdr.as_bytes()).await?;
     sock.write_all(body).await?;
     sock.shutdown().await
+}
+
+/// The managed surface's route table, mirrored from `scrape_api::handlers`.
+/// Kept as literal `("METHOD", "/path")` arms, one per line, so
+/// `tests/route_contract.rs` can pin the surface against
+/// `web/src/lib/apiRoutes/API_ROUTES.ts` exactly like the console router —
+/// the handlers own the real matching, this is the published contract.
+fn managed_route(method: &str, route: &str) -> bool {
+    matches!(
+        (method, route),
+        ("POST", "/v1/scrape")
+            | ("POST", "/v1/jobs")
+            | ("GET", "/v1/jobs")
+            | ("GET", "/v1/jobs/:id")
+            | ("POST", "/v1/jobs/:id/cancel")
+            | ("GET", "/v1/usage")
+            | ("GET", "/v1/openapi.json")
+            | ("POST", "/v1/admin/tenants")
+            | ("GET", "/v1/admin/tenants")
+            | ("POST", "/v1/admin/keys")
+            | ("GET", "/v1/admin/keys")
+            | ("POST", "/v1/admin/keys/:id/rotate")
+            | ("POST", "/v1/admin/keys/:id/revoke")
+            | ("POST", "/v1/admin/keys/:id/suspend")
+            | ("GET", "/v1/admin/usage")
+            | ("POST", "/v1/admin/usage/export")
+    )
+}
+
+/// Hand a `/v1/*` request to the managed customer API. Returns `None` when
+/// no app is attached, so the console router answers (503/404) instead of
+/// silently dropping the request.
+///
+/// The extra headers are the managed envelope's own: a throttled reply
+/// carries `Retry-After` mirrored from its `retry_after_ms`.
+async fn dispatch_managed(
+    state: &AdminState,
+    head: &str,
+    method: &str,
+    raw_route: &str,
+    qs: &str,
+    body: &[u8],
+) -> Option<(u16, &'static str, String, Vec<(String, String)>)> {
+    let app = state.managed_app()?;
+    let head = crate::scrape_api::handlers::Head {
+        method: method.to_string(),
+        path: raw_route.to_string(),
+        query: qs.to_string(),
+        body: body.to_vec(),
+        authorization: header_value(head, "authorization").map(str::to_string),
+        api_key: header_value(head, "x-api-key").map(str::to_string),
+        idempotency_key: header_value(head, "idempotency-key").map(str::to_string),
+        content_type: header_value(head, "content-type").map(str::to_string),
+    };
+    let (status, body) = crate::scrape_api::handlers::dispatch(&app, &head).await;
+    let extra = managed_extra_headers(status, &body);
+    Some((status, "application/json", body, extra))
+}
+
+/// `Retry-After` for a throttled managed reply.
+///
+/// The envelope already carries `retry_after_ms`; the HTTP layer mirrors it
+/// as the standard header so a generic client can honour it without parsing
+/// the body. Capped at one day so a quota reset far in the future cannot
+/// produce an absurd header value.
+fn managed_extra_headers(status: u16, body: &str) -> Vec<(String, String)> {
+    if status != 429 {
+        return Vec::new();
+    }
+    let Some(ms) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("retry_after_ms"))
+                .and_then(serde_json::Value::as_u64)
+        })
+    else {
+        return Vec::new();
+    };
+    let secs = ms.div_ceil(1000).min(86_400);
+    vec![("Retry-After".to_string(), secs.to_string())]
 }
 
 /// Route table. Every handler returns the full response triple; errors are
@@ -1070,7 +1259,9 @@ fn dispatch(
              /retries /workers /queue /proxies /pipeline /storage /diagnostics /alerts \
              /ops /audit /config /control/crawl /control/export /control/ai \
              /control/jobs /control/jobs/:id /control/jobs/:id/cancel \
-             /control/artifacts/:id /artifacts/:id /artifacts/:id/verify /health /policy\n"
+             /control/artifacts/:id /artifacts/:id /artifacts/:id/verify \
+             /health /policy /v1/scrape /v1/jobs /v1/jobs/:id \
+             /v1/jobs/:id/cancel /v1/usage /v1/openapi.json /v1/admin/*\n"
                 .to_string(),
         ),
     }

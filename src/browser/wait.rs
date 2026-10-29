@@ -77,7 +77,6 @@ async fn condition_met(session: &BrowserSession, condition: &WaitCondition) -> B
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn wait_timeout_bounds_reject_zero() {
         assert!(!(100..=300_000).contains(&0));
